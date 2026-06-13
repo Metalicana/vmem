@@ -150,6 +150,22 @@ def _local_to_dataset_indices(local_indices: Sequence[int], frame_indices: Seque
     return dataset_indices
 
 
+def _annotate_retrieval_trace(records: Sequence[dict], frame_indices: Sequence[int]) -> None:
+    for record in records:
+        record["target_dataset_frame_indices"] = _local_to_dataset_indices(
+            record["target_frame_indices"],
+            frame_indices,
+        )
+        record["allowed_dataset_frame_indices"] = _local_to_dataset_indices(
+            record["allowed_memory_indices"],
+            frame_indices,
+        )
+        record["selected_dataset_frame_indices"] = _local_to_dataset_indices(
+            record["selected_context_indices"],
+            frame_indices,
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -280,6 +296,7 @@ def main() -> None:
         device=device,
     )
     pipeline.initialize(initial_image, c2ws[0], Ks[0])
+    partial_trace_path = run_dir / "retrieval_trace.partial.json"
 
     autocast_context = (
         torch.autocast("cuda") if device.type == "cuda" else nullcontext()
@@ -298,6 +315,8 @@ def main() -> None:
                 target_Ks,
                 use_non_maximum_suppression=None,
             )
+            _annotate_retrieval_trace(pipeline.retrieval_trace, frame_indices)
+            pipeline.save_retrieval_trace(str(partial_trace_path))
 
     generated_frames = pipeline.pil_frames[: args.num_frames]
     generated_video_path = run_dir / "generated.mp4"
@@ -324,19 +343,7 @@ def main() -> None:
         for local_idx, frame in enumerate(generated_frames):
             frame.save(frame_dir / f"{local_idx:04d}.png")
 
-    for record in pipeline.retrieval_trace:
-        record["target_dataset_frame_indices"] = _local_to_dataset_indices(
-            record["target_frame_indices"],
-            frame_indices,
-        )
-        record["allowed_dataset_frame_indices"] = _local_to_dataset_indices(
-            record["allowed_memory_indices"],
-            frame_indices,
-        )
-        record["selected_dataset_frame_indices"] = _local_to_dataset_indices(
-            record["selected_context_indices"],
-            frame_indices,
-        )
+    _annotate_retrieval_trace(pipeline.retrieval_trace, frame_indices)
 
     trace_path = run_dir / "retrieval_trace.json"
     pipeline.save_retrieval_trace(str(trace_path))

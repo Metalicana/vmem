@@ -199,6 +199,18 @@ class VMemPipeline:
         ]
         return [idx for _, idx in sorted(zip(distances, indices), key=lambda item: item[0])]
 
+    @staticmethod
+    def _dedupe_indices(indices):
+        deduped = []
+        seen = set()
+        for idx in indices:
+            idx = int(idx)
+            if idx in seen:
+                continue
+            deduped.append(idx)
+            seen.add(idx)
+        return deduped
+
     def _record_retrieval_trace(
         self,
         *,
@@ -776,12 +788,20 @@ class VMemPipeline:
                     average_c2w,
                 )
 
-            max_frames = min(
-                self.config.model.context_num_frames,
-                len(sorted_frames),
-                len(self.latents),
-                len(allowed_memory_indices),
+            sorted_frames = self._dedupe_indices(sorted_frames)
+            pose_ranked_allowed = self._rank_memory_indices_by_pose(
+                allowed_memory_indices,
+                average_c2w,
             )
+            for idx in pose_ranked_allowed:
+                if idx not in sorted_frames:
+                    sorted_frames.append(idx)
+
+            desired_context_slots = min(
+                self.config.model.context_num_frames,
+                self.config.model.num_frames - len(target_c2ws),
+            )
+            max_frames = min(desired_context_slots, len(self.latents))
             if max_frames == 0:
                 raise RuntimeError("No eligible memory frames available for context retrieval")
             
@@ -865,6 +885,16 @@ class VMemPipeline:
                     if idx in allowed_memory_set and idx not in selected_indices:
                         available_indices.append(idx)
                 selected_indices.extend(available_indices[:max_frames-len(selected_indices)])
+
+            # The diffusion backbone expects a fixed number of conditioning slots.
+            # If a small memory budget has fewer unique eligible frames than slots,
+            # repeat legal frames instead of selecting outside the budget.
+            if len(selected_indices) < max_frames:
+                fill_source = selected_indices or sorted_frames or allowed_memory_indices
+                fill_pos = 0
+                while len(selected_indices) < max_frames and fill_source:
+                    selected_indices.append(fill_source[fill_pos % len(fill_source)])
+                    fill_pos += 1
             selected_indices = selected_indices[:max_frames]
             
             # Convert to tensor and maintain original order (don't reverse)

@@ -61,10 +61,12 @@ def summarize_run(path: Path) -> dict:
     selected_outside_allowed = []
     fifo_window_violations = []
     selected_sizes = []
+    unique_selected_sizes = []
     allowed_sizes = []
     raw_candidate_counts = []
     bounded_candidate_counts = []
     fallback_steps = []
+    duplicate_context_records = []
 
     policy = metadata.get("memory_policy")
     budget = metadata.get("memory_budget")
@@ -102,6 +104,17 @@ def summarize_run(path: Path) -> dict:
                 )
 
         selected_sizes.append(len(selected))
+        unique_selected_size = len(set(selected))
+        unique_selected_sizes.append(unique_selected_size)
+        if len(selected) != unique_selected_size:
+            duplicate_context_records.append(
+                {
+                    "record_index": record_index,
+                    "global_step": record.get("global_step"),
+                    "selected_context_indices": selected,
+                    "unique_selected_context_size": unique_selected_size,
+                }
+            )
         allowed_sizes.append(len(allowed))
         raw_candidate_counts.append(float(record.get("raw_candidate_count", 0)))
         bounded_candidate_counts.append(float(record.get("bounded_candidate_count", 0)))
@@ -137,6 +150,10 @@ def summarize_run(path: Path) -> dict:
         "num_trace_records": len(trace),
         "max_allowed_memory_size": max(allowed_sizes) if allowed_sizes else 0,
         "max_selected_context_size": max(selected_sizes) if selected_sizes else 0,
+        "max_unique_selected_context_size": (
+            max(unique_selected_sizes) if unique_selected_sizes else 0
+        ),
+        "duplicate_context_record_count": len(duplicate_context_records),
         "mean_raw_candidate_count": _mean(raw_candidate_counts),
         "mean_bounded_candidate_count": _mean(bounded_candidate_counts),
         "fallback_step_count": len(fallback_steps),
@@ -149,6 +166,7 @@ def summarize_run(path: Path) -> dict:
         ),
         "first_record": _record_brief(trace[0]) if trace else None,
         "last_record": _record_brief(trace[-1]) if trace else None,
+        "duplicate_context_sample": duplicate_context_records[:5],
         "selected_outside_allowed_sample": selected_outside_allowed[:5],
         "fifo_window_violation_sample": fifo_window_violations[:5],
     }
