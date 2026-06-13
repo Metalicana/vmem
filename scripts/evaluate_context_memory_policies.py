@@ -11,6 +11,7 @@ Relevance: overlap labels restricted to overlap_frame < current_frame.
 from __future__ import annotations
 
 import argparse
+from bisect import bisect_left
 from collections import defaultdict
 import csv
 import json
@@ -65,30 +66,35 @@ def _summarize_metric(values: Sequence[float]) -> dict[str, float]:
     }
 
 
-def _uniform_temporal_memory(past_frames: Sequence[int], budget: int) -> set[int]:
-    if len(past_frames) <= budget:
-        return set(past_frames)
+def _uniform_temporal_positions(num_past_frames: int, budget: int) -> set[int]:
+    if num_past_frames <= budget:
+        return set(range(num_past_frames))
     if budget == 1:
-        return {past_frames[-1]}
+        return {num_past_frames - 1}
 
-    max_pos = len(past_frames) - 1
+    max_pos = num_past_frames - 1
     positions = {
         round(i * max_pos / (budget - 1))
         for i in range(budget)
     }
-    return {past_frames[pos] for pos in positions}
+    return positions
 
 
-def _hybrid_recent_uniform_memory(past_frames: Sequence[int], budget: int) -> set[int]:
-    if len(past_frames) <= budget:
-        return set(past_frames)
+def _hybrid_recent_uniform_positions(num_past_frames: int, budget: int) -> set[int]:
+    if num_past_frames <= budget:
+        return set(range(num_past_frames))
 
     recent_budget = max(1, budget // 2)
     uniform_budget = budget - recent_budget
-    recent = set(past_frames[-recent_budget:])
+    recent_start = max(0, num_past_frames - recent_budget)
+    recent = set(range(recent_start, num_past_frames))
 
-    older_frames = past_frames[: max(0, len(past_frames) - recent_budget)]
-    uniform = _uniform_temporal_memory(older_frames, uniform_budget) if uniform_budget else set()
+    num_older_frames = max(0, num_past_frames - recent_budget)
+    uniform = (
+        _uniform_temporal_positions(num_older_frames, uniform_budget)
+        if uniform_budget
+        else set()
+    )
     memory = recent | uniform
 
     if len(memory) > budget:
@@ -211,6 +217,15 @@ def _score_memory(memory: set[int], relevant: set[int]) -> dict[str, float]:
     }
 
 
+def _score_hits(*, hits: int, memory_size: int, relevant_size: int) -> dict[str, float]:
+    return {
+        "recall": hits / relevant_size,
+        "precision": hits / memory_size if memory_size else 0.0,
+        "any_hit": 1.0 if hits else 0.0,
+        "memory_size": float(memory_size),
+    }
+
+
 def evaluate_sequence(
     sequence: ContextMemorySequence,
     *,
@@ -219,6 +234,9 @@ def evaluate_sequence(
     include_oracle: bool,
 ) -> list[PolicyResult]:
     frame_indices = sequence.frame_indices
+    position_by_frame = {
+        frame_index: position for position, frame_index in enumerate(frame_indices)
+    }
     rng_by_budget = {budget: random.Random(seed + budget) for budget in budgets}
     reservoir_memory: dict[int, list[int]] = {budget: [] for budget in budgets}
     seen_count = 0
@@ -226,24 +244,54 @@ def evaluate_sequence(
     records: dict[tuple[str, int], list[dict[str, float]]] = defaultdict(list)
 
     for position, frame_index in enumerate(frame_indices):
-        relevant = set(sequence.overlap_label(frame_index, past_only=True).overlapping_frames)
+        raw_relevant = sequence.overlap_label(frame_index, past_only=True).overlapping_frames
+        relevant_positions = sorted(
+            frame_position
+            for overlap_index in raw_relevant
+            if (frame_position := position_by_frame.get(overlap_index)) is not None
+        )
+        relevant_size = len(relevant_positions)
 
-        if relevant:
-            past_frames = frame_indices[:position]
+        if relevant_size:
+            relevant_position_set = set(relevant_positions)
             for budget in budgets:
-                memories = {
-                    "recency": set(past_frames[-budget:]),
-                    "uniform_temporal": _uniform_temporal_memory(past_frames, budget),
-                    "hybrid_recent_uniform": _hybrid_recent_uniform_memory(past_frames, budget),
-                    "reservoir_random": set(reservoir_memory[budget]),
-                }
-                if include_oracle:
-                    memories["oracle_upper_bound"] = set(
-                        sorted(relevant, reverse=True)[:budget]
+                recency_start = max(0, position - budget)
+                recency_hits = len(relevant_positions) - bisect_left(
+                    relevant_positions,
+                    recency_start,
+                )
+                recency_memory_size = min(budget, position)
+                records[("recency", budget)].append(
+                    _score_hits(
+                        hits=recency_hits,
+                        memory_size=recency_memory_size,
+                        relevant_size=relevant_size,
                     )
+                )
 
-                for policy, memory in memories.items():
-                    records[(policy, budget)].append(_score_memory(memory, relevant))
+                uniform_memory = _uniform_temporal_positions(position, budget)
+                records[("uniform_temporal", budget)].append(
+                    _score_memory(uniform_memory, relevant_position_set)
+                )
+
+                hybrid_memory = _hybrid_recent_uniform_positions(position, budget)
+                records[("hybrid_recent_uniform", budget)].append(
+                    _score_memory(hybrid_memory, relevant_position_set)
+                )
+
+                records[("reservoir_random", budget)].append(
+                    _score_memory(set(reservoir_memory[budget]), relevant_position_set)
+                )
+
+                if include_oracle:
+                    oracle_memory_size = min(budget, relevant_size)
+                    records[("oracle_upper_bound", budget)].append(
+                        _score_hits(
+                            hits=oracle_memory_size,
+                            memory_size=oracle_memory_size,
+                            relevant_size=relevant_size,
+                        )
+                    )
 
         # Update online reservoir memories after scoring the current frame.
         seen_count += 1
@@ -251,11 +299,11 @@ def evaluate_sequence(
             memory = reservoir_memory[budget]
             rng = rng_by_budget[budget]
             if len(memory) < budget:
-                memory.append(frame_index)
+                memory.append(position)
             else:
                 replace_pos = rng.randrange(seen_count)
                 if replace_pos < budget:
-                    memory[replace_pos] = frame_index
+                    memory[replace_pos] = position
 
     results: list[PolicyResult] = []
     policy_order = [
@@ -312,13 +360,24 @@ def main() -> None:
         default="json",
         help="Output format.",
     )
+    parser.add_argument(
+        "--progress",
+        action="store_true",
+        help="Print per-scene progress to stderr.",
+    )
     args = parser.parse_args()
 
     dataset = ContextMemoryDataset(args.root)
     scene_ids = tuple(args.scenes) if args.scenes else dataset.scene_ids()[: args.max_scenes]
 
     scene_results = []
-    for sequence in dataset.sequences(scene_ids):
+    for scene_number, sequence in enumerate(dataset.sequences(scene_ids), start=1):
+        if args.progress:
+            print(
+                f"[{scene_number}/{len(scene_ids)}] evaluating {sequence.scene_id}",
+                file=sys.stderr,
+                flush=True,
+            )
         scene_results.append(
             {
                 "scene_id": sequence.scene_id,
