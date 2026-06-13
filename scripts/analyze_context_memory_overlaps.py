@@ -96,6 +96,8 @@ def analyze_sequence(
     past_counts: list[int] = []
     future_counts: list[int] = []
     same_frame_counts: list[int] = []
+    past_overlap_lags: list[int] = []
+    nearest_past_overlap_lags: list[int] = []
     past_count_by_frame: dict[int, int] = {}
     future_count_by_frame: dict[int, int] = {}
     first_frame_with_past_overlap: int | None = None
@@ -131,8 +133,12 @@ def analyze_sequence(
         past_count_by_frame[frame_index] = len(past_overlaps)
         future_count_by_frame[frame_index] = len(future_overlaps)
 
-        if past_overlaps and first_frame_with_past_overlap is None:
-            first_frame_with_past_overlap = frame_index
+        if past_overlaps:
+            lags = [frame_index - overlap_index for overlap_index in past_overlaps]
+            past_overlap_lags.extend(lags)
+            nearest_past_overlap_lags.append(min(lags))
+            if first_frame_with_past_overlap is None:
+                first_frame_with_past_overlap = frame_index
 
         if not past_overlaps:
             continue
@@ -167,6 +173,8 @@ def analyze_sequence(
         "past_overlap_count": _describe(past_counts),
         "future_overlap_count": _describe(future_counts),
         "same_frame_overlap_count": _describe(same_frame_counts),
+        "past_overlap_lag": _describe(past_overlap_lags),
+        "nearest_past_overlap_lag": _describe(nearest_past_overlap_lags),
         "top_past_overlap_frames": _top_counts(
             past_count_by_frame,
             limit=sample_limit,
