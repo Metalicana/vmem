@@ -1,6 +1,7 @@
 import os
 from typing import List, Union
 from copy import deepcopy
+import json
 
 import math
 
@@ -130,20 +131,106 @@ class VMemPipeline:
             os.makedirs(self.visualize_dir)
         
         self.global_step = 0
+        self.memory_policy = "unbounded"
+        self.memory_budget = None
+        self.memory_scope = "view_context"
+        self.retrieval_trace = []
        
 
     def reset(self):
-        self.rgb_vae_latents = []
-        self.rgb_encoder_embeddings = []
+        self.latents = []
+        self.encoder_embeddings = []
         self.poses = []
+        self.c2ws = []
         self.focal_lengths = []
         self.surfels = []
         self.surfel_Ks = []
         self.surfel_depths = []
         self.Ks = []
         self.surfel_to_timestep = {}
-        self.all_pil_frames = []
+        self.pil_frames = []
+        self.retrieval_trace = []
         self.global_step = 0
+
+    def configure_memory_budget(self, policy="unbounded", budget=None, scope="view_context"):
+        """Configure which stored view memories are eligible for context retrieval.
+
+        The first bounded-memory experiment uses scope='view_context'. This keeps
+        VMem's surfel geometry intact but restricts the view indices that can be
+        selected as conditioning context. Fully deleting/remapping surfels is a
+        separate, stricter intervention.
+        """
+        if policy not in {"unbounded", "fifo"}:
+            raise ValueError(f"Unsupported memory policy: {policy}")
+        if scope != "view_context":
+            raise ValueError("Only scope='view_context' is currently implemented")
+        if policy == "fifo":
+            if budget is None or int(budget) <= 0:
+                raise ValueError("FIFO memory policy requires a positive budget")
+            budget = int(budget)
+        else:
+            budget = None
+
+        self.memory_policy = policy
+        self.memory_budget = budget
+        self.memory_scope = scope
+
+    def get_allowed_memory_indices(self):
+        num_memories = len(getattr(self, "c2ws", []))
+        if num_memories == 0:
+            return []
+        if self.memory_policy == "unbounded" or self.memory_budget is None:
+            return list(range(num_memories))
+        if self.memory_policy == "fifo":
+            start = max(0, num_memories - self.memory_budget)
+            return list(range(start, num_memories))
+        raise ValueError(f"Unsupported memory policy: {self.memory_policy}")
+
+    def _rank_memory_indices_by_pose(self, indices, target_c2w):
+        if len(indices) == 0:
+            return []
+        distances = [
+            self.geodesic_distance(
+                torch.from_numpy(np.array(target_c2w)).to(self.device, self.dtype),
+                torch.from_numpy(np.array(self.c2ws[idx])).to(self.device, self.dtype),
+                weight_translation=self.config.model.translation_distance_weight,
+            ).item()
+            for idx in indices
+        ]
+        return [idx for _, idx in sorted(zip(distances, indices), key=lambda item: item[0])]
+
+    def _record_retrieval_trace(
+        self,
+        *,
+        target_frame_indices,
+        allowed_memory_indices,
+        raw_candidate_count,
+        bounded_candidate_count,
+        selected_context_indices,
+        fallback_used,
+    ):
+        self.retrieval_trace.append(
+            {
+                "global_step": int(self.global_step),
+                "num_stored_views": int(len(getattr(self, "c2ws", []))),
+                "memory_policy": self.memory_policy,
+                "memory_budget": self.memory_budget,
+                "memory_scope": self.memory_scope,
+                "target_frame_indices": [int(idx) for idx in target_frame_indices],
+                "allowed_memory_indices": [int(idx) for idx in allowed_memory_indices],
+                "raw_candidate_count": int(raw_candidate_count),
+                "bounded_candidate_count": int(bounded_candidate_count),
+                "selected_context_indices": [
+                    int(idx) for idx in np.array(selected_context_indices).tolist()
+                ],
+                "fallback_used": bool(fallback_used),
+            }
+        )
+
+    def save_retrieval_trace(self, path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(self.retrieval_trace, handle, indent=2)
 
     
     def initialize(self, image, c2w, K):
@@ -515,6 +602,9 @@ class VMemPipeline:
         """
         # Function to prepare context tensors from indices
         def prepare_context_data(indices):
+            if isinstance(indices, torch.Tensor):
+                indices = indices.detach().cpu().numpy().tolist()
+            indices = [int(i) for i in indices]
             c2ws = [self.c2ws[i] for i in indices]
             latents = [torch.from_numpy(self.latents[i]).to(self.device, self.dtype) for i in indices]
             embeddings = [torch.from_numpy(self.encoder_embeddings[i]).to(self.device, self.dtype) for i in indices]
@@ -628,6 +718,12 @@ class VMemPipeline:
         #     context_data = prepare_context_data(context_time_indices)
         
         # else:
+        allowed_memory_indices = self.get_allowed_memory_indices()
+        allowed_memory_set = set(allowed_memory_indices)
+        raw_candidate_count = 0
+        bounded_candidate_count = 0
+        fallback_used = False
+
         if len(self.pil_frames) == 1:
             context_time_indices = [0]
         else:
@@ -655,20 +751,39 @@ class VMemPipeline:
             # Build candidate frames based on relevance count
             candidates = []
             for frame, count in frame_count:
-                candidates.extend([frame] * count)
+                candidates.extend([int(frame)] * int(count))
+
+            raw_candidate_count = len(candidates)
+            candidates = [frame for frame in candidates if frame in allowed_memory_set]
+            bounded_candidate_count = len(candidates)
+                
+            # Sort candidates by distance to target view
+            if candidates:
                 indices_to_frame = {
                     i: frame for i, frame in enumerate(candidates)
                 }
+                distances = [self.geodesic_distance(torch.from_numpy(average_c2w).to(self.device, self.dtype), 
+                                                    torch.from_numpy(self.c2ws[frame]).to(self.device, self.dtype), 
+                                                    weight_translation=self.config.model.translation_distance_weight).item() 
+                            for frame in candidates]
                 
-            # Sort candidates by distance to target view
-            distances = [self.geodesic_distance(torch.from_numpy(average_c2w).to(self.device, self.dtype), 
-                                                torch.from_numpy(self.c2ws[frame]).to(self.device, self.dtype), 
-                                                weight_translation=self.config.model.translation_distance_weight).item() 
-                        for frame in candidates]
-            
-            sorted_indices = torch.argsort(torch.tensor(distances))
-            sorted_frames = [indices_to_frame[int(i.item())] for i in sorted_indices]
-            max_frames = min(self.config.model.context_num_frames, len(candidates), len(self.latents))
+                sorted_indices = torch.argsort(torch.tensor(distances))
+                sorted_frames = [indices_to_frame[int(i.item())] for i in sorted_indices]
+            else:
+                fallback_used = True
+                sorted_frames = self._rank_memory_indices_by_pose(
+                    allowed_memory_indices,
+                    average_c2w,
+                )
+
+            max_frames = min(
+                self.config.model.context_num_frames,
+                len(sorted_frames),
+                len(self.latents),
+                len(allowed_memory_indices),
+            )
+            if max_frames == 0:
+                raise RuntimeError("No eligible memory frames available for context retrieval")
             
 
             is_second_step = len(self.pil_frames) == 5
@@ -710,7 +825,9 @@ class VMemPipeline:
             # Always start with the closest pose
             selected_indices.append(sorted_frames[0])
             if not use_non_maximum_suppression:
-                selected_indices.append(len(self.c2ws) - 1)
+                latest_allowed_idx = allowed_memory_indices[-1]
+                if latest_allowed_idx not in selected_indices:
+                    selected_indices.append(latest_allowed_idx)
             
             # Try with increasingly relaxed thresholds until we get enough frames
             while len(selected_indices) < max_frames and current_threshold >= 1e-5 and use_non_maximum_suppression:
@@ -745,12 +862,21 @@ class VMemPipeline:
             if len(selected_indices) < max_frames:
                 available_indices = []
                 for idx in sorted_frames:
-                    if idx not in selected_indices:
+                    if idx in allowed_memory_set and idx not in selected_indices:
                         available_indices.append(idx)
                 selected_indices.extend(available_indices[:max_frames-len(selected_indices)])
+            selected_indices = selected_indices[:max_frames]
             
             # Convert to tensor and maintain original order (don't reverse)
             context_time_indices = torch.from_numpy(np.array(selected_indices))
+        self._record_retrieval_trace(
+            target_frame_indices=getattr(self, "_active_target_frame_indices", []),
+            allowed_memory_indices=allowed_memory_indices,
+            raw_candidate_count=raw_candidate_count,
+            bounded_candidate_count=bounded_candidate_count,
+            selected_context_indices=context_time_indices,
+            fallback_used=fallback_used,
+        )
         context_data = prepare_context_data(context_time_indices)
             
         (context_c2ws, context_latents, context_encoder_embeddings, context_Ks, context_time_indices) = context_data
@@ -1244,6 +1370,9 @@ class VMemPipeline:
             
             target_c2ws = c2ws_tensor[cur_start_idx:cur_end_idx]
             target_Ks = Ks_tensor[cur_start_idx:cur_end_idx]
+            self._active_target_frame_indices = list(
+                range(len(self.pil_frames), len(self.pil_frames) + target_length)
+            )
             
  
             context_info = self.get_context_info(target_c2ws, use_non_maximum_suppression)
