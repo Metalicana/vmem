@@ -209,6 +209,14 @@ def main() -> None:
         help="Override config.surfel.niter for cheap smoke tests.",
     )
     parser.add_argument(
+        "--surfel-reconstruction-window",
+        type=int,
+        help=(
+            "Fast visual mode: reconstruct surfels from only the most recent N "
+            "generated/conditioning frames instead of all frames so far."
+        ),
+    )
+    parser.add_argument(
         "--pose-scale",
         type=float,
         default=0.01,
@@ -280,6 +288,7 @@ def main() -> None:
         budget=args.memory_budget,
         scope="view_context",
     )
+    pipeline.configure_surfel_reconstruction(window=args.surfel_reconstruction_window)
 
     c2ws = _build_camera_trajectory(
         sequence,
@@ -371,6 +380,7 @@ def main() -> None:
         "config_overrides": {
             "inference_steps": args.inference_steps,
             "surfel_niter": args.surfel_niter,
+            "surfel_reconstruction_window": args.surfel_reconstruction_window,
             "visualize_intermediates": args.visualize_intermediates,
         },
     }

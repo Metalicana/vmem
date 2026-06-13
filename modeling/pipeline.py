@@ -135,6 +135,7 @@ class VMemPipeline:
         self.memory_budget = None
         self.memory_scope = "view_context"
         self.retrieval_trace = []
+        self.surfel_reconstruction_window = None
        
 
     def reset(self):
@@ -151,6 +152,15 @@ class VMemPipeline:
         self.pil_frames = []
         self.retrieval_trace = []
         self.global_step = 0
+
+    def configure_surfel_reconstruction(self, window=None):
+        if window is None:
+            self.surfel_reconstruction_window = None
+            return
+        window = int(window)
+        if window <= 0:
+            raise ValueError("surfel reconstruction window must be positive")
+        self.surfel_reconstruction_window = window
 
     def configure_memory_budget(self, policy="unbounded", budget=None, scope="view_context"):
         """Configure which stored view memories are eligible for context retrieval.
@@ -1113,6 +1123,7 @@ class VMemPipeline:
     def construct_and_store_scene(self, 
             input_images: List[PIL.Image.Image],
             time_indices,
+            input_time_indices=None,
             niter = 1000,
             lr = 0.01,
             device = 'cuda',
@@ -1128,15 +1139,34 @@ class VMemPipeline:
             device: Device to run inference on
             only_last_frame: Whether to only process the last frame
         """
+        if input_time_indices is None:
+            input_time_indices = list(range(len(input_images)))
+        input_time_indices = [int(idx) for idx in input_time_indices]
+        if len(input_time_indices) != len(input_images):
+            raise ValueError("input_time_indices must match input_images length")
+
         # Flip Y and Z components of camera poses to match dataset convention
-        c2ws_transformed = self.get_transformed_c2ws()
+        c2ws_transformed = self.get_transformed_c2ws(
+            [self.c2ws[idx] for idx in input_time_indices]
+        )
+
+        prior_depths = None
+        if len(self.surfel_depths) > 0:
+            selected_depths = []
+            for idx in input_time_indices:
+                if idx >= len(self.surfel_depths) or self.surfel_depths[idx] is None:
+                    selected_depths = []
+                    break
+                selected_depths.append(self.surfel_depths[idx])
+            if selected_depths:
+                prior_depths = torch.from_numpy(np.array(selected_depths))
         
 
         scene = run_inference_from_pil(
             input_images,
             self.surfel_model,
             poses=c2ws_transformed,
-            depths=torch.from_numpy(np.array(self.surfel_depths)) if len(self.surfel_depths) > 0 else None,
+            depths=prior_depths,
             lr = lr,
             niter = niter,
             visualize=self.config.inference.visualize_pointcloud,
@@ -1148,8 +1178,14 @@ class VMemPipeline:
         confs = torch.cat(scene['confidences'], dim=0)
         depths = torch.cat(scene['depths'], dim=0)
         focal_lengths = scene['camera_info']['focal']
-        self.surfel_Ks.extend([focal_lengths[i] for i in range(len(focal_lengths))])
-        self.surfel_depths = [depths[i].detach().cpu().numpy() for i in range(len(depths))]
+        max_time_index = max(input_time_indices)
+        while len(self.surfel_Ks) <= max_time_index:
+            self.surfel_Ks.append(None)
+        while len(self.surfel_depths) <= max_time_index:
+            self.surfel_depths.append(None)
+        for local_idx, time_idx in enumerate(input_time_indices):
+            self.surfel_Ks[time_idx] = focal_lengths[local_idx]
+            self.surfel_depths[time_idx] = depths[local_idx].detach().cpu().numpy()
         # Resize pointcloud
         pointcloud = pointcloud.permute(0, 3, 1, 2)
         pointcloud = F.interpolate(
@@ -1184,6 +1220,7 @@ class VMemPipeline:
         # for frame_idx in range(len(pointcloud)):
         # Create surfels for the current frame
         for frame_idx in range(start_idx, end_idx):
+            global_frame_idx = input_time_indices[frame_idx]
             surfels = self.pointmap_to_surfels(
                 pointmap=pointcloud[frame_idx],
                 focal_lengths=focal_lengths[frame_idx] * self.config.surfel.shrink_factor,
@@ -1197,7 +1234,7 @@ class VMemPipeline:
             if len(self.surfels) > 0:
                 surfels, self.surfel_to_timestep = self.merge_surfels(
                     new_surfels=surfels,
-                    current_timestep=frame_idx,
+                    current_timestep=global_frame_idx,
                     existing_surfels=self.surfels,
                     existing_surfel_to_timestep=self.surfel_to_timestep,
                     # position_threshold=self.config.surfel.merge_position_threshold,
@@ -1209,7 +1246,7 @@ class VMemPipeline:
             num_surfels = len(surfels)
             surfel_start_index = len(self.surfels)
             for surfel_index in range(num_surfels):
-                self.surfel_to_timestep[surfel_start_index + surfel_index] = [frame_idx]
+                self.surfel_to_timestep[surfel_start_index + surfel_index] = [global_frame_idx]
 
             # Save surfels if configured
             # if self.config.inference.save_surfels and len(self.surfels) > 0:
@@ -1461,8 +1498,22 @@ class VMemPipeline:
             
             # Update scene reconstruction if needed
      
-            self.construct_and_store_scene(self.pil_frames, 
+            reconstruction_time_indices = list(range(len(self.pil_frames)))
+            if self.surfel_reconstruction_window is not None:
+                reconstruction_start = max(
+                    0,
+                    len(self.pil_frames) - self.surfel_reconstruction_window,
+                )
+                reconstruction_time_indices = list(
+                    range(reconstruction_start, len(self.pil_frames))
+                )
+            reconstruction_frames = [
+                self.pil_frames[idx] for idx in reconstruction_time_indices
+            ]
+
+            self.construct_and_store_scene(reconstruction_frames, 
                                         time_indices=context_time_indices,
+                                        input_time_indices=reconstruction_time_indices,
                                         niter=self.config.surfel.niter, 
                                         lr=self.config.surfel.lr, 
                                         device=self.device)
