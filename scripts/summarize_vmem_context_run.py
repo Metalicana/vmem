@@ -72,6 +72,7 @@ def summarize_run(path: Path) -> dict:
     budget = metadata.get("memory_budget")
     budget = int(budget) if budget is not None else None
     config_overrides = metadata.get("config_overrides", {})
+    camera_conversion = metadata.get("camera_conversion", {})
 
     for record_index, record in enumerate(trace):
         allowed = _as_int_list(record.get("allowed_memory_indices"))
@@ -143,6 +144,10 @@ def summarize_run(path: Path) -> dict:
         "memory_budget": budget,
         "memory_scope": metadata.get("memory_scope"),
         "memory_unit": metadata.get("memory_unit"),
+        "camera_convention": camera_conversion.get("camera_convention"),
+        "pose_scale": camera_conversion.get("pose_scale"),
+        "rotation_order": camera_conversion.get("rotation_order"),
+        "native_step_size": camera_conversion.get("native_step_size"),
         "inference_steps": config_overrides.get("inference_steps"),
         "surfel_niter": config_overrides.get("surfel_niter"),
         "surfel_reconstruction_window": config_overrides.get(

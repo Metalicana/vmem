@@ -98,17 +98,57 @@ def _camera_to_c2w(
     origin: np.ndarray,
     pose_scale: float,
     rotation_order: str,
+    camera_convention: str,
 ) -> np.ndarray:
-    position = (np.array(camera.position, dtype=np.float64) - origin) * pose_scale
-    rotation = Rotation.from_euler(
-        rotation_order,
-        np.array(camera.rotation, dtype=np.float64),
-        degrees=True,
-    ).as_matrix()
+    raw_position = (np.array(camera.position, dtype=np.float64) - origin) * pose_scale
+    raw_rotation = np.array(camera.rotation, dtype=np.float64)
+    if camera_convention == "scipy_euler":
+        position = raw_position
+        rotation = Rotation.from_euler(
+            rotation_order,
+            raw_rotation,
+            degrees=True,
+        ).as_matrix()
+    elif camera_convention == "unreal":
+        # Context-as-Memory camera metadata appears to come from Unreal.
+        # Unreal world: X forward, Y right, Z up.
+        # VMem navigation convention: X right, Y up, camera forward is -Z.
+        unreal_to_vmem = np.array(
+            [
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [-1.0, 0.0, 0.0],
+            ],
+            dtype=np.float64,
+        )
+        roll, pitch, yaw = raw_rotation
+        unreal_rotation = Rotation.from_euler(
+            "ZYX",
+            [yaw, pitch, roll],
+            degrees=True,
+        ).as_matrix()
+        position = unreal_to_vmem @ raw_position
+        rotation = unreal_to_vmem @ unreal_rotation @ unreal_to_vmem.T
+    else:
+        raise ValueError(f"Unsupported camera convention: {camera_convention}")
+
     c2w = np.eye(4, dtype=np.float32)
     c2w[:3, :3] = rotation.astype(np.float32)
     c2w[:3, 3] = position.astype(np.float32)
     return c2w
+
+
+def _build_native_forward_trajectory(
+    frame_indices: Sequence[int],
+    *,
+    native_step_size: float,
+) -> list[np.ndarray]:
+    c2ws = []
+    for local_idx, _ in enumerate(frame_indices):
+        c2w = np.eye(4, dtype=np.float32)
+        c2w[2, 3] = -float(native_step_size) * local_idx
+        c2ws.append(c2w)
+    return c2ws
 
 
 def _build_camera_trajectory(
@@ -117,7 +157,15 @@ def _build_camera_trajectory(
     *,
     pose_scale: float,
     rotation_order: str,
+    camera_convention: str,
+    native_step_size: float,
 ) -> list[np.ndarray]:
+    if camera_convention == "native_forward":
+        return _build_native_forward_trajectory(
+            frame_indices,
+            native_step_size=native_step_size,
+        )
+
     origin = np.array(sequence.camera(frame_indices[0]).position, dtype=np.float64)
     return [
         _camera_to_c2w(
@@ -125,6 +173,7 @@ def _build_camera_trajectory(
             origin=origin,
             pose_scale=pose_scale,
             rotation_order=rotation_order,
+            camera_convention=camera_convention,
         )
         for frame_index in frame_indices
     ]
@@ -137,7 +186,7 @@ def _build_run_dir(args) -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     name = (
         f"{args.scene}_start{args.start_frame:04d}_N{args.num_frames}_"
-        f"H{args.chunk_size}_{budget_part}_{timestamp}"
+        f"H{args.chunk_size}_{budget_part}_{args.camera_convention}_{timestamp}"
     )
     return args.output_root / name
 
@@ -223,9 +272,24 @@ def main() -> None:
         help="Scale applied to dataset positions after subtracting the anchor position.",
     )
     parser.add_argument(
+        "--camera-convention",
+        choices=("scipy_euler", "unreal", "native_forward"),
+        default="scipy_euler",
+        help=(
+            "How to convert Context-as-Memory cameras to VMem poses. "
+            "Use native_forward to ignore dataset poses for a VMem sanity check."
+        ),
+    )
+    parser.add_argument(
         "--rotation-order",
         default="xyz",
-        help="Euler order for dataset rotation degrees. Assumption to validate.",
+        help="Euler order for --camera-convention scipy_euler.",
+    )
+    parser.add_argument(
+        "--native-step-size",
+        type=float,
+        default=0.025,
+        help="Per-frame forward distance for --camera-convention native_forward.",
     )
     parser.add_argument("--save-gt-video", action="store_true")
     parser.add_argument("--save-frames", action="store_true")
@@ -295,6 +359,8 @@ def main() -> None:
         frame_indices,
         pose_scale=args.pose_scale,
         rotation_order=args.rotation_order,
+        camera_convention=args.camera_convention,
+        native_step_size=args.native_step_size,
     )
     K = get_default_intrinsics()[0].detach().cpu().numpy()
     Ks = [K for _ in frame_indices]
@@ -371,11 +437,17 @@ def main() -> None:
         "ground_truth_video": gt_video_path,
         "retrieval_trace": trace_path,
         "camera_conversion": {
+            "camera_convention": args.camera_convention,
             "pose_scale": args.pose_scale,
             "rotation_order": args.rotation_order,
+            "native_step_size": args.native_step_size,
             "position_origin_frame": frame_indices[0],
             "position_origin": sequence.camera(frame_indices[0]).position,
-            "assumption": "Dataset rotations are Euler degrees in rotation_order; positions are centered at anchor and scaled.",
+            "assumption": (
+                "scipy_euler uses raw dataset rotations as Rotation.from_euler(rotation_order). "
+                "unreal treats rotations as roll,pitch,yaw and maps Unreal X/Y/Z to VMem -Z/X/Y. "
+                "native_forward ignores dataset camera metadata."
+            ),
         },
         "config_overrides": {
             "inference_steps": args.inference_steps,
