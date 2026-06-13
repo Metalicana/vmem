@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 from collections import defaultdict
+import csv
 import json
 from pathlib import Path
 import random
@@ -130,6 +131,76 @@ def _summarize_records(
     }
 
 
+def _flatten_scene_results(scene_results: Sequence[dict]) -> list[PolicyResult]:
+    rows: list[PolicyResult] = []
+    for scene in scene_results:
+        rows.extend(scene["policy_results"])
+    return rows
+
+
+def _weighted_mean(rows: Sequence[PolicyResult], key: str) -> float:
+    total_weight = sum(float(row["eligible_frames"]) for row in rows)
+    if total_weight == 0:
+        return 0.0
+    return float(
+        sum(float(row[key]) * float(row["eligible_frames"]) for row in rows)
+        / total_weight
+    )
+
+
+def _aggregate_policy_results(rows: Sequence[PolicyResult]) -> list[PolicyResult]:
+    grouped: dict[tuple[str, int], list[PolicyResult]] = defaultdict(list)
+    for row in rows:
+        grouped[(str(row["policy"]), int(row["budget"]))].append(row)
+
+    summary_rows: list[PolicyResult] = []
+    for (policy, budget), group in sorted(grouped.items(), key=lambda item: (item[0][1], item[0][0])):
+        summary_rows.append(
+            {
+                "scene_id": "ALL",
+                "policy": policy,
+                "budget": budget,
+                "num_scenes": len(group),
+                "eligible_frames": int(sum(int(row["eligible_frames"]) for row in group)),
+                "mean_recall": _weighted_mean(group, "mean_recall"),
+                "macro_mean_recall": float(
+                    sum(float(row["mean_recall"]) for row in group) / len(group)
+                ),
+                "median_recall": _weighted_mean(group, "median_recall"),
+                "p10_recall": _weighted_mean(group, "p10_recall"),
+                "p90_recall": _weighted_mean(group, "p90_recall"),
+                "mean_precision": _weighted_mean(group, "mean_precision"),
+                "median_precision": _weighted_mean(group, "median_precision"),
+                "any_hit_rate": _weighted_mean(group, "any_hit_rate"),
+                "mean_memory_size": _weighted_mean(group, "mean_memory_size"),
+            }
+        )
+    return summary_rows
+
+
+def _write_csv(rows: Sequence[PolicyResult]) -> None:
+    fieldnames = [
+        "scene_id",
+        "policy",
+        "budget",
+        "num_scenes",
+        "eligible_frames",
+        "mean_recall",
+        "macro_mean_recall",
+        "median_recall",
+        "p10_recall",
+        "p90_recall",
+        "mean_precision",
+        "median_precision",
+        "any_hit_rate",
+        "mean_memory_size",
+    ]
+    writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames, extrasaction="ignore")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow(row)
+
+
 def _score_memory(memory: set[int], relevant: set[int]) -> dict[str, float]:
     hits = len(memory.intersection(relevant))
     return {
@@ -230,6 +301,17 @@ def main() -> None:
         action="store_true",
         help="Do not include the non-deployable oracle upper-bound policy.",
     )
+    parser.add_argument(
+        "--summary-only",
+        action="store_true",
+        help="Aggregate rows by policy and budget across scenes.",
+    )
+    parser.add_argument(
+        "--format",
+        choices=("json", "csv"),
+        default="json",
+        help="Output format.",
+    )
     args = parser.parse_args()
 
     dataset = ContextMemoryDataset(args.root)
@@ -249,23 +331,30 @@ def main() -> None:
             }
         )
 
-    print(
-        json.dumps(
-            {
-                "root": str(args.root),
-                "assumptions": [
-                    "budget is measured in remembered frame indices",
-                    "relevance uses only overlap labels with overlap_frame < current_frame",
-                    "oracle_upper_bound is non-deployable and uses current-frame labels",
-                    "reservoir_random is online and updated only after scoring the current frame",
-                ],
-                "budgets": list(args.budgets),
-                "seed": args.seed,
-                "scenes": scene_results,
-            },
-            indent=2,
-        )
-    )
+    flat_rows = _flatten_scene_results(scene_results)
+    rows = _aggregate_policy_results(flat_rows) if args.summary_only else flat_rows
+
+    if args.format == "csv":
+        _write_csv(rows)
+        return
+
+    payload = {
+        "root": str(args.root),
+        "assumptions": [
+            "budget is measured in remembered frame indices",
+            "relevance uses only overlap labels with overlap_frame < current_frame",
+            "oracle_upper_bound is non-deployable and uses current-frame labels",
+            "reservoir_random is online and updated only after scoring the current frame",
+            "summary rows use eligible-frame-weighted averages plus macro_mean_recall",
+        ],
+        "budgets": list(args.budgets),
+        "seed": args.seed,
+    }
+    if args.summary_only:
+        payload["summary_policy_results"] = rows
+    else:
+        payload["scenes"] = scene_results
+    print(json.dumps(payload, indent=2))
 
 
 if __name__ == "__main__":
