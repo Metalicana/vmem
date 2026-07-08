@@ -60,9 +60,11 @@ def summarize_run(path: Path) -> dict:
 
     selected_outside_allowed = []
     fifo_window_violations = []
+    budget_size_violations = []
     selected_sizes = []
     unique_selected_sizes = []
     allowed_sizes = []
+    retained_surfel_counts = []
     raw_candidate_counts = []
     bounded_candidate_counts = []
     fallback_steps = []
@@ -105,6 +107,17 @@ def summarize_run(path: Path) -> dict:
                     }
                 )
 
+        if policy in {"fifo", "rarity_irreplaceability", "slam_covisibility"} and budget is not None:
+            if len(set(allowed)) > budget:
+                budget_size_violations.append(
+                    {
+                        "record_index": record_index,
+                        "global_step": record.get("global_step"),
+                        "budget": budget,
+                        "allowed_memory_indices": allowed,
+                    }
+                )
+
         selected_sizes.append(len(selected))
         unique_selected_size = len(set(selected))
         unique_selected_sizes.append(unique_selected_size)
@@ -118,6 +131,7 @@ def summarize_run(path: Path) -> dict:
                 }
             )
         allowed_sizes.append(len(allowed))
+        retained_surfel_counts.append(int(record.get("num_retained_surfels", 0)))
         raw_candidate_counts.append(float(record.get("raw_candidate_count", 0)))
         bounded_candidate_counts.append(float(record.get("bounded_candidate_count", 0)))
         if record.get("fallback_used", False):
@@ -133,6 +147,12 @@ def summarize_run(path: Path) -> dict:
         run_dir=run_dir,
         default_name="ground_truth.mp4",
     )
+    memory_trace_path = _resolve_path(
+        metadata.get("memory_trace"),
+        run_dir=run_dir,
+        default_name="memory_trace.json",
+    )
+    memory_trace = _read_json(memory_trace_path) if memory_trace_path.exists() else []
 
     summary = {
         "run_dir": str(run_dir),
@@ -158,8 +178,12 @@ def summarize_run(path: Path) -> dict:
         "ground_truth_video": str(ground_truth_video),
         "ground_truth_video_exists": ground_truth_video.exists(),
         "trace_path": str(trace_path),
+        "memory_trace_path": str(memory_trace_path),
+        "memory_trace_exists": memory_trace_path.exists(),
+        "memory_eviction_count": len(memory_trace),
         "num_trace_records": len(trace),
         "max_allowed_memory_size": max(allowed_sizes) if allowed_sizes else 0,
+        "max_retained_surfel_count": max(retained_surfel_counts) if retained_surfel_counts else 0,
         "max_selected_context_size": max(selected_sizes) if selected_sizes else 0,
         "max_unique_selected_context_size": (
             max(unique_selected_sizes) if unique_selected_sizes else 0
@@ -170,7 +194,12 @@ def summarize_run(path: Path) -> dict:
         "fallback_step_count": len(fallback_steps),
         "fallback_steps": fallback_steps,
         "selected_outside_allowed_count": len(selected_outside_allowed),
+        "budget_size_violation_count": len(budget_size_violations),
         "fifo_window_violation_count": len(fifo_window_violations),
+        "budget_verified": (
+            len(selected_outside_allowed) == 0
+            and len(budget_size_violations) == 0
+        ),
         "fifo_verified": (
             len(selected_outside_allowed) == 0
             and len(fifo_window_violations) == 0
@@ -179,7 +208,9 @@ def summarize_run(path: Path) -> dict:
         "last_record": _record_brief(trace[-1]) if trace else None,
         "duplicate_context_sample": duplicate_context_records[:5],
         "selected_outside_allowed_sample": selected_outside_allowed[:5],
+        "budget_size_violation_sample": budget_size_violations[:5],
         "fifo_window_violation_sample": fifo_window_violations[:5],
+        "memory_eviction_sample": memory_trace[:5],
     }
     return summary
 
@@ -194,14 +225,14 @@ def main() -> None:
     parser.add_argument(
         "--fail-on-violation",
         action="store_true",
-        help="Exit nonzero if selected context frames violate the configured FIFO window.",
+        help="Exit nonzero if selected context frames violate the configured budget.",
     )
     args = parser.parse_args()
 
     summary = summarize_run(args.run_path)
     print(json.dumps(summary, indent=2))
 
-    if args.fail_on_violation and not summary["fifo_verified"]:
+    if args.fail_on_violation and not summary["budget_verified"]:
         sys.exit(1)
 
 

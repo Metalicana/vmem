@@ -24,6 +24,13 @@ from extern.CUT3R.add_ckpt_path import add_path_to_dust3r
 from extern.CUT3R.src.dust3r.model import ARCroco3DStereo
 
 from modeling import VMemWrapper, VMemModel, VMemModelParams
+from modeling.memory_policies import (
+    BUDGETED_MEMORY_POLICIES,
+    SUPPORTED_MEMORY_POLICIES,
+    FrameMemoryBuffer,
+    compute_rarity_irreplaceability_scores,
+    compute_slam_covisibility_scores,
+)
 from modeling.modules.autoencoder import AutoEncoder
 from modeling.sampling import DDPMDiscretization, DiscreteDenoiser, create_samplers
 from modeling.modules.conditioner import CLIPConditioner
@@ -133,8 +140,10 @@ class VMemPipeline:
         self.global_step = 0
         self.memory_policy = "unbounded"
         self.memory_budget = None
-        self.memory_scope = "view_context"
+        self.memory_scope = "surfel_indexed_view_memory"
+        self.memory_buffer = None
         self.retrieval_trace = []
+        self.memory_events = []
         self.surfel_reconstruction_window = None
        
 
@@ -151,6 +160,8 @@ class VMemPipeline:
         self.surfel_to_timestep = {}
         self.pil_frames = []
         self.retrieval_trace = []
+        self.memory_events = []
+        self.memory_buffer = self._new_memory_buffer()
         self.global_step = 0
 
     def configure_surfel_reconstruction(self, window=None):
@@ -162,28 +173,57 @@ class VMemPipeline:
             raise ValueError("surfel reconstruction window must be positive")
         self.surfel_reconstruction_window = window
 
-    def configure_memory_budget(self, policy="unbounded", budget=None, scope="view_context"):
-        """Configure which stored view memories are eligible for context retrieval.
+    def configure_memory_budget(
+        self,
+        policy="unbounded",
+        budget=None,
+        scope="surfel_indexed_view_memory",
+    ):
+        """Configure the online frame memory bank used by surfel retrieval.
 
-        The first bounded-memory experiment uses scope='view_context'. This keeps
-        VMem's surfel geometry intact but restricts the view indices that can be
-        selected as conditioning context. Fully deleting/remapping surfels is a
-        separate, stricter intervention.
+        Budget unit is a stored generated/conditioning frame. In
+        scope='surfel_indexed_view_memory', evicted frame ids are also removed
+        from the surfel-to-timestep index. In scope='view_context', the surfel
+        geometry remains unbounded and only context-frame eligibility is limited.
         """
-        if policy not in {"unbounded", "fifo"}:
+        if policy not in SUPPORTED_MEMORY_POLICIES:
             raise ValueError(f"Unsupported memory policy: {policy}")
-        if scope != "view_context":
-            raise ValueError("Only scope='view_context' is currently implemented")
-        if policy == "fifo":
+        if scope not in {"surfel_indexed_view_memory", "view_context"}:
+            raise ValueError(
+                "memory scope must be 'surfel_indexed_view_memory' or 'view_context'"
+            )
+        if policy in BUDGETED_MEMORY_POLICIES:
             if budget is None or int(budget) <= 0:
-                raise ValueError("FIFO memory policy requires a positive budget")
+                raise ValueError(f"{policy} memory policy requires a positive budget")
             budget = int(budget)
+            if policy in {"rarity_irreplaceability", "slam_covisibility"} and budget < 2:
+                raise ValueError(f"{policy} requires memory_budget >= 2")
         else:
             budget = None
 
         self.memory_policy = policy
         self.memory_budget = budget
         self.memory_scope = scope
+        self.memory_buffer = self._new_memory_buffer()
+        if getattr(self, "c2ws", None):
+            self._update_memory_budget(
+                range(len(self.c2ws)),
+                protected_frames={len(self.c2ws) - 1},
+            )
+
+    def _pinned_memory_frames(self):
+        if self.memory_policy in {"rarity_irreplaceability", "slam_covisibility"}:
+            return {0}
+        return set()
+
+    def _new_memory_buffer(self):
+        if getattr(self, "memory_policy", "unbounded") == "unbounded":
+            return None
+        return FrameMemoryBuffer(
+            policy=self.memory_policy,
+            budget=self.memory_budget,
+            pinned_frames=self._pinned_memory_frames(),
+        )
 
     def get_allowed_memory_indices(self):
         num_memories = len(getattr(self, "c2ws", []))
@@ -191,10 +231,157 @@ class VMemPipeline:
             return []
         if self.memory_policy == "unbounded" or self.memory_budget is None:
             return list(range(num_memories))
-        if self.memory_policy == "fifo":
-            start = max(0, num_memories - self.memory_budget)
-            return list(range(start, num_memories))
+        if self.memory_buffer is not None:
+            return [
+                idx for idx in self.memory_buffer.candidates() if 0 <= idx < num_memories
+            ]
         raise ValueError(f"Unsupported memory policy: {self.memory_policy}")
+
+    def _visual_feature_dict(self, frame_indices):
+        features = {}
+        for frame_idx in frame_indices:
+            frame_idx = int(frame_idx)
+            if 0 <= frame_idx < len(self.encoder_embeddings):
+                feature = np.asarray(self.encoder_embeddings[frame_idx], dtype=np.float32)
+            elif 0 <= frame_idx < len(self.latents):
+                feature = np.asarray(self.latents[frame_idx], dtype=np.float32)
+            else:
+                continue
+            features[frame_idx] = feature.reshape(-1)
+        return features
+
+    def _compute_memory_scores(self, frame_indices):
+        frame_indices = sorted(
+            {int(idx) for idx in frame_indices if 0 <= int(idx) < len(self.c2ws)}
+        )
+        if self.memory_policy in {"unbounded", "fifo"} or not frame_indices:
+            return None, {}
+
+        visual_features = self._visual_feature_dict(frame_indices)
+        pinned_frames = self._pinned_memory_frames()
+        if self.memory_policy == "rarity_irreplaceability":
+            return compute_rarity_irreplaceability_scores(
+                memory_frame_indices=frame_indices,
+                latent_features=visual_features,
+                pinned_frames=pinned_frames,
+                return_details=True,
+            )
+        if self.memory_policy == "slam_covisibility":
+            return compute_slam_covisibility_scores(
+                memory_frame_indices=frame_indices,
+                c2ws=np.asarray(self.c2ws),
+                pinned_frames=pinned_frames,
+                latent_features=visual_features,
+                return_details=True,
+            )
+        return None, {}
+
+    @staticmethod
+    def _trace_value(value):
+        if isinstance(value, (np.integer,)):
+            return int(value)
+        if isinstance(value, (np.floating, float)):
+            value = float(value)
+            if not np.isfinite(value):
+                return "inf" if value > 0 else "-inf"
+            return value
+        if isinstance(value, dict):
+            return {key: VMemPipeline._trace_value(inner) for key, inner in value.items()}
+        if isinstance(value, (list, tuple, set)):
+            return [VMemPipeline._trace_value(inner) for inner in value]
+        return value
+
+    def _record_memory_event(self, payload):
+        self.memory_events.append(self._trace_value(payload))
+
+    def _prune_surfels_to_memory(self):
+        if self.memory_policy == "unbounded" or self.memory_scope != "surfel_indexed_view_memory":
+            return
+
+        allowed = set(self.get_allowed_memory_indices())
+        if not allowed:
+            self.surfels = []
+            self.surfel_to_timestep = {}
+            return
+
+        retained_surfels = []
+        retained_mapping = {}
+        for old_surfel_idx, surfel in enumerate(self.surfels):
+            timesteps = [
+                int(timestep)
+                for timestep in self.surfel_to_timestep.get(old_surfel_idx, [])
+                if int(timestep) in allowed
+            ]
+            if not timesteps:
+                continue
+            retained_mapping[len(retained_surfels)] = sorted(set(timesteps))
+            retained_surfels.append(surfel)
+
+        self.surfels = retained_surfels
+        self.surfel_to_timestep = retained_mapping
+
+    def _update_memory_budget(self, new_frame_indices, protected_frames=None):
+        if self.memory_policy == "unbounded":
+            return []
+        if self.memory_buffer is None:
+            self.memory_buffer = self._new_memory_buffer()
+
+        new_frame_indices = [
+            int(idx) for idx in new_frame_indices if 0 <= int(idx) < len(self.c2ws)
+        ]
+        if not new_frame_indices:
+            return []
+
+        current_memory = self.memory_buffer.candidates()
+        prospective_memory = current_memory + [
+            idx for idx in new_frame_indices if idx not in current_memory
+        ]
+        scores, score_details = self._compute_memory_scores(prospective_memory)
+        evicted = self.memory_buffer.update(
+            new_frame_indices,
+            eviction_scores=scores,
+            protected_frames=protected_frames,
+        )
+        if evicted:
+            self._prune_surfels_to_memory()
+
+        retained_memory = self.get_allowed_memory_indices()
+        section_end_frame = max(new_frame_indices)
+        for evicted_frame in evicted:
+            detail = score_details.get(evicted_frame, {})
+            self._record_memory_event(
+                {
+                    "event": "memory_eviction",
+                    "global_step": int(self.global_step),
+                    "evicted_memory_frame": int(evicted_frame),
+                    "section_end_frame": int(section_end_frame),
+                    "memory_age_at_eviction": int(section_end_frame - evicted_frame),
+                    "stored_memory_size": len(retained_memory),
+                    "retained_memory_indices": retained_memory,
+                    "memory_policy": self.memory_policy,
+                    "memory_budget": self.memory_budget,
+                    "memory_scope": self.memory_scope,
+                    "eviction_score": detail.get("score"),
+                    "eviction_rarity": detail.get("rarity"),
+                    "eviction_irreplaceability": detail.get("irreplaceability"),
+                    "eviction_cluster_id": detail.get("cluster_id"),
+                    "eviction_cluster_size": detail.get("cluster_size"),
+                    "eviction_cluster_threshold": detail.get("cluster_threshold"),
+                    "eviction_nearest_frame": detail.get("nearest_frame"),
+                    "eviction_nearest_distance": detail.get("nearest_distance"),
+                    "eviction_redundancy_ratio": detail.get("redundancy_ratio"),
+                    "eviction_covisible_observers": detail.get("covisible_observers"),
+                    "eviction_max_covisibility": detail.get("max_covisibility"),
+                    "eviction_nearest_covisible_frame": detail.get(
+                        "nearest_covisible_frame"
+                    ),
+                    "eviction_marginal_contribution": detail.get(
+                        "marginal_contribution"
+                    ),
+                    "eviction_unique_bonus": detail.get("unique_bonus"),
+                }
+            )
+        return evicted
 
     def _rank_memory_indices_by_pose(self, indices, target_c2w):
         if len(indices) == 0:
@@ -231,10 +418,24 @@ class VMemPipeline:
         selected_context_indices,
         fallback_used,
     ):
+        selected_indices = [
+            int(idx) for idx in np.array(selected_context_indices).tolist()
+        ]
+        if self.memory_buffer is not None:
+            for idx in set(selected_indices):
+                self.memory_buffer.record_selection(idx, overlap=1.0)
+
         self.retrieval_trace.append(
             {
                 "global_step": int(self.global_step),
                 "num_stored_views": int(len(getattr(self, "c2ws", []))),
+                "memory_buffer_size": (
+                    None if self.memory_buffer is None else int(len(self.memory_buffer))
+                ),
+                "num_retained_surfels": int(len(getattr(self, "surfels", []))),
+                "num_retained_surfel_timestep_refs": int(
+                    sum(len(v) for v in getattr(self, "surfel_to_timestep", {}).values())
+                ),
                 "memory_policy": self.memory_policy,
                 "memory_budget": self.memory_budget,
                 "memory_scope": self.memory_scope,
@@ -242,9 +443,7 @@ class VMemPipeline:
                 "allowed_memory_indices": [int(idx) for idx in allowed_memory_indices],
                 "raw_candidate_count": int(raw_candidate_count),
                 "bounded_candidate_count": int(bounded_candidate_count),
-                "selected_context_indices": [
-                    int(idx) for idx in np.array(selected_context_indices).tolist()
-                ],
+                "selected_context_indices": selected_indices,
                 "fallback_used": bool(fallback_used),
             }
         )
@@ -253,6 +452,11 @@ class VMemPipeline:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as handle:
             json.dump(self.retrieval_trace, handle, indent=2)
+
+    def save_memory_trace(self, path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(self.memory_events, handle, indent=2)
 
     
     def initialize(self, image, c2w, K):
@@ -292,6 +496,7 @@ class VMemPipeline:
         # Convert to PIL and store
         pil_frame = tensor_to_pil(image_tensor)
         self.pil_frames = [pil_frame]
+        self._update_memory_budget([0], protected_frames={0})
         
 
         
@@ -377,6 +582,13 @@ class VMemPipeline:
         surfel_index_map = np.full((image_height, image_width), -1, dtype=np.int32)
         z_buffer = np.full((image_height, image_width), np.inf, dtype=np.float32)
         cos_buffer = np.zeros((image_height, image_width), dtype=np.float32)
+        if len(surfels) == 0:
+            z_buffer[z_buffer == np.inf] = 0
+            return {
+                "depth": z_buffer,
+                "surfel_index_map": surfel_index_map,
+                "cos_value_map": cos_buffer,
+            }
 
         # Unpack camera parameters
         fx, fy, cx, cy = focal_lengths[0], focal_lengths[1], principal_points[0], principal_points[1]
@@ -594,9 +806,14 @@ class VMemPipeline:
                 timestep_count[timestep] += cos_value/(1+depth_value)
             
 
+        if not timestep_count:
+            return [], []
 
         timestep_count_values = np.array(list(timestep_count.values()))
-        timestep_count_ratios = timestep_count_values / np.sum(timestep_count_values)
+        timestep_count_sum = np.sum(timestep_count_values)
+        if timestep_count_sum <= 0:
+            return [], []
+        timestep_count_ratios = timestep_count_values / timestep_count_sum
         timestep_weights = {k: timestep_count_ratios[i] for i, k in enumerate(timestep_count)}
         num_retrieved_frames = min(self.config.model.context_num_frames+10, len(timestep_weights))
         frame_count = self.get_frame_distribution(num_retrieved_frames, list(timestep_weights.values())) # hard code
@@ -751,23 +968,28 @@ class VMemPipeline:
         else:
             # get the average camera pose
             average_c2w = average_camera_pose(target_c2ws[-self.config.model.context_num_frames//4:])
-            transformed_average_c2w = self.get_transformed_c2ws(average_c2w)
-            target_K = np.mean(self.surfel_Ks, axis=0)
-            # Select frames using surfel-based relevance
-            retrieved_info = self.render_surfels_to_image(
-                self.surfels,
-                transformed_average_c2w,
-                [target_K*0.65] * 2,
-                principal_points=(int(self.config.surfel.width/2), int(self.config.surfel.height/2)),
-                image_width=int(self.config.surfel.width),
-                image_height=int(self.config.surfel.height)
-            )
-            _, frame_count = self.process_retrieved_spatial_information(retrieved_info)
-            if self.config.inference.visualize:
-                visualize_depth(retrieved_info["depth"],
-                                visualization_dir=self.visualize_dir, 
-                                file_name=f"retrieved_depth_surfels.png",
-                                size=(self.width, self.height))
+            valid_surfel_Ks = [K for K in self.surfel_Ks if K is not None]
+            frame_count = []
+            if self.surfels and valid_surfel_Ks:
+                transformed_average_c2w = self.get_transformed_c2ws(average_c2w)
+                target_K = np.mean(valid_surfel_Ks, axis=0)
+                # Select frames using surfel-based relevance.
+                retrieved_info = self.render_surfels_to_image(
+                    self.surfels,
+                    transformed_average_c2w,
+                    [target_K*0.65] * 2,
+                    principal_points=(int(self.config.surfel.width/2), int(self.config.surfel.height/2)),
+                    image_width=int(self.config.surfel.width),
+                    image_height=int(self.config.surfel.height)
+                )
+                _, frame_count = self.process_retrieved_spatial_information(retrieved_info)
+                if self.config.inference.visualize:
+                    visualize_depth(retrieved_info["depth"],
+                                    visualization_dir=self.visualize_dir,
+                                    file_name=f"retrieved_depth_surfels.png",
+                                    size=(self.width, self.height))
+            else:
+                fallback_used = True
             
             
             # Build candidate frames based on relevance count
@@ -812,7 +1034,7 @@ class VMemPipeline:
                 self.config.model.num_frames - len(target_c2ws),
             )
             max_frames = min(desired_context_slots, len(self.latents))
-            if max_frames == 0:
+            if max_frames == 0 or not allowed_memory_indices:
                 raise RuntimeError("No eligible memory frames available for context retrieval")
             
 
@@ -827,8 +1049,8 @@ class VMemPipeline:
                 if is_second_step:
                     # Calculate pairwise distances between existing frames
                     pairwise_distances = []
-                    for i in range(len(self.c2ws)):
-                        for j in range(i+1, len(self.c2ws)):
+                    for pos, i in enumerate(allowed_memory_indices):
+                        for j in allowed_memory_indices[pos+1:]:
                             sim = self.geodesic_distance(
                                 torch.from_numpy(np.array(self.c2ws[i])).to(self.device, self.dtype),
                                 torch.from_numpy(np.array(self.c2ws[j])).to(self.device, self.dtype),
@@ -1405,6 +1627,7 @@ class VMemPipeline:
         # Generate frames in steps
         cur_start_idx = 0
         for i in range(generation_steps):
+            padding_size = 0
             # Calculate frame indices for this step
             if i > 0:
                 cur_start_idx = cur_end_idx
@@ -1486,27 +1709,38 @@ class VMemPipeline:
             target_encoder_embeddings = encode_image(target_samples, self.image_encoder, self.device, self.dtype)
             target_latents = samples_z[~input_masks]
             
+            new_memory_indices = []
             for j in range(target_num - padding_size if padding_size > 0 else target_num):
+                global_frame_idx = len(self.pil_frames)
                 self.latents.append(target_latents[j].detach().cpu().numpy())
                 self.encoder_embeddings.append(target_encoder_embeddings[j].detach().cpu().numpy())
                 self.Ks.append(target_Ks[j].detach().cpu().numpy())
                 self.c2ws.append(target_c2ws[j].detach().cpu().numpy())
                 self.pil_frames.append(target_pil_frames[j])
+                new_memory_indices.append(global_frame_idx)
                 
                 if self.config.inference.visualize:
                     self.pil_frames[-1].save(f"{self.config.visualization_dir}/final_{len(self.pil_frames):07d}.png")
             
             # Update scene reconstruction if needed
      
-            reconstruction_time_indices = list(range(len(self.pil_frames)))
+            if (
+                self.memory_policy in BUDGETED_MEMORY_POLICIES
+                and self.memory_scope == "surfel_indexed_view_memory"
+            ):
+                reconstruction_time_indices = sorted(
+                    set(self.get_allowed_memory_indices()) | set(new_memory_indices)
+                )
+            else:
+                reconstruction_time_indices = list(range(len(self.pil_frames)))
             if self.surfel_reconstruction_window is not None:
                 reconstruction_start = max(
                     0,
                     len(self.pil_frames) - self.surfel_reconstruction_window,
                 )
-                reconstruction_time_indices = list(
-                    range(reconstruction_start, len(self.pil_frames))
-                )
+                reconstruction_time_indices = [
+                    idx for idx in reconstruction_time_indices if idx >= reconstruction_start
+                ]
             reconstruction_frames = [
                 self.pil_frames[idx] for idx in reconstruction_time_indices
             ]
@@ -1517,6 +1751,11 @@ class VMemPipeline:
                                         niter=self.config.surfel.niter, 
                                         lr=self.config.surfel.lr, 
                                         device=self.device)
+            if new_memory_indices:
+                self._update_memory_budget(
+                    new_memory_indices,
+                    protected_frames={new_memory_indices[-1]},
+                )
             self.global_step += 1
                         
             if self.config.inference.visualize:

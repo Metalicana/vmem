@@ -1,9 +1,8 @@
 #!/usr/bin/env python
-"""Run VMem on a Context-as-Memory trajectory with an optional FIFO memory budget.
+"""Run VMem on a Context-as-Memory trajectory with optional frame memory budgets.
 
-This is the first experimental runner, not the final benchmark harness. It keeps
-VMem's generation and retrieval structure intact, but can restrict which stored
-view memories are eligible for context retrieval.
+Budgeted policies retain a bounded bank of generated/conditioning frames, then
+VMem's original surfel-vote retrieval chooses context frames from that bank.
 """
 
 from __future__ import annotations
@@ -23,6 +22,17 @@ if str(REPO_ROOT) not in sys.path:
 
 
 DEFAULT_OUTPUT_ROOT = Path("/data/ab575577/vmem_context_memory_runs")
+MEMORY_POLICIES = (
+    "unbounded",
+    "fifo",
+    "rarity_irreplaceability",
+    "slam_covisibility",
+)
+BUDGETED_MEMORY_POLICIES = (
+    "fifo",
+    "rarity_irreplaceability",
+    "slam_covisibility",
+)
 
 
 def _load_runtime_dependencies() -> None:
@@ -181,8 +191,8 @@ def _build_camera_trajectory(
 
 def _build_run_dir(args) -> Path:
     budget_part = "unbounded"
-    if args.memory_policy == "fifo":
-        budget_part = f"fifo_B{args.memory_budget}"
+    if args.memory_policy in BUDGETED_MEMORY_POLICIES:
+        budget_part = f"{args.memory_policy}_B{args.memory_budget}"
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     name = (
         f"{args.scene}_start{args.start_frame:04d}_N{args.num_frames}_"
@@ -215,6 +225,21 @@ def _annotate_retrieval_trace(records: Sequence[dict], frame_indices: Sequence[i
         )
 
 
+def _annotate_memory_trace(records: Sequence[dict], frame_indices: Sequence[int]) -> None:
+    for record in records:
+        evicted = record.get("evicted_memory_frame")
+        evicted_dataset = (
+            _local_to_dataset_indices([evicted], frame_indices)
+            if evicted is not None
+            else []
+        )
+        record["evicted_dataset_frame"] = evicted_dataset[0] if evicted_dataset else None
+        record["retained_dataset_frame_indices"] = _local_to_dataset_indices(
+            record.get("retained_memory_indices", []),
+            frame_indices,
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -240,10 +265,19 @@ def main() -> None:
     )
     parser.add_argument(
         "--memory-policy",
-        choices=("unbounded", "fifo"),
+        choices=MEMORY_POLICIES,
         default="unbounded",
     )
     parser.add_argument("--memory-budget", type=int)
+    parser.add_argument(
+        "--memory-scope",
+        choices=("surfel_indexed_view_memory", "view_context"),
+        default="surfel_indexed_view_memory",
+        help=(
+            "surfel_indexed_view_memory prunes evicted frame ids from the surfel "
+            "index; view_context only restricts eligible conditioning frames."
+        ),
+    )
     parser.add_argument("--config", type=Path, default=Path("configs/inference/inference.yaml"))
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int, default=42)
@@ -304,8 +338,16 @@ def main() -> None:
         raise ValueError("--num-frames must include anchor plus at least one target frame")
     if args.chunk_size <= 0:
         raise ValueError("--chunk-size must be positive")
-    if args.memory_policy == "fifo" and (args.memory_budget is None or args.memory_budget <= 0):
-        raise ValueError("--memory-policy fifo requires --memory-budget")
+    if args.memory_policy in BUDGETED_MEMORY_POLICIES and (
+        args.memory_budget is None or args.memory_budget <= 0
+    ):
+        raise ValueError(f"--memory-policy {args.memory_policy} requires --memory-budget")
+    if (
+        args.memory_policy in {"rarity_irreplaceability", "slam_covisibility"}
+        and args.memory_budget is not None
+        and args.memory_budget < 2
+    ):
+        raise ValueError(f"--memory-policy {args.memory_policy} requires --memory-budget >= 2")
 
     _load_runtime_dependencies()
 
@@ -350,7 +392,7 @@ def main() -> None:
     pipeline.configure_memory_budget(
         policy=args.memory_policy,
         budget=args.memory_budget,
-        scope="view_context",
+        scope=args.memory_scope,
     )
     pipeline.configure_surfel_reconstruction(window=args.surfel_reconstruction_window)
 
@@ -372,6 +414,7 @@ def main() -> None:
     )
     pipeline.initialize(initial_image, c2ws[0], Ks[0])
     partial_trace_path = run_dir / "retrieval_trace.partial.json"
+    partial_memory_trace_path = run_dir / "memory_trace.partial.json"
 
     autocast_context = (
         torch.autocast("cuda") if device.type == "cuda" else nullcontext()
@@ -391,7 +434,9 @@ def main() -> None:
                 use_non_maximum_suppression=None,
             )
             _annotate_retrieval_trace(pipeline.retrieval_trace, frame_indices)
+            _annotate_memory_trace(pipeline.memory_events, frame_indices)
             pipeline.save_retrieval_trace(str(partial_trace_path))
+            pipeline.save_memory_trace(str(partial_memory_trace_path))
 
     generated_frames = pipeline.pil_frames[: args.num_frames]
     generated_video_path = run_dir / "generated.mp4"
@@ -419,9 +464,12 @@ def main() -> None:
             frame.save(frame_dir / f"{local_idx:04d}.png")
 
     _annotate_retrieval_trace(pipeline.retrieval_trace, frame_indices)
+    _annotate_memory_trace(pipeline.memory_events, frame_indices)
 
     trace_path = run_dir / "retrieval_trace.json"
     pipeline.save_retrieval_trace(str(trace_path))
+    memory_trace_path = run_dir / "memory_trace.json"
+    pipeline.save_memory_trace(str(memory_trace_path))
 
     metadata = {
         "scene_id": args.scene,
@@ -436,6 +484,7 @@ def main() -> None:
         "generated_video": generated_video_path,
         "ground_truth_video": gt_video_path,
         "retrieval_trace": trace_path,
+        "memory_trace": memory_trace_path,
         "camera_conversion": {
             "camera_convention": args.camera_convention,
             "pose_scale": args.pose_scale,
@@ -466,6 +515,7 @@ def main() -> None:
         "ground_truth_video": gt_video_path,
         "metadata": metadata_path,
         "retrieval_trace": trace_path,
+        "memory_trace": memory_trace_path,
     }), indent=2))
 
 
