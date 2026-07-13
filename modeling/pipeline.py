@@ -162,6 +162,8 @@ class VMemPipeline:
         self.retrieval_trace = []
         self.memory_events = []
         self.memory_buffer = self._new_memory_buffer()
+        if hasattr(self, "initial_threshold"):
+            del self.initial_threshold
         self.global_step = 0
 
     def configure_surfel_reconstruction(self, window=None):
@@ -1038,16 +1040,14 @@ class VMemPipeline:
                 raise RuntimeError("No eligible memory frames available for context retrieval")
             
 
-            is_second_step = len(self.pil_frames) == 5
-    
-            
             # Adaptively determine initial threshold based on camera pose distribution
             if use_non_maximum_suppression is None:
                 use_non_maximum_suppression = self.use_non_maximum_suppression
                 
             if use_non_maximum_suppression:
-                if is_second_step:
-                    # Calculate pairwise distances between existing frames
+                if not hasattr(self, "initial_threshold"):
+                    # Calculate pairwise distances between eligible memory frames
+                    # the first time surfel retrieval has enough history.
                     pairwise_distances = []
                     for pos, i in enumerate(allowed_memory_indices):
                         for j in allowed_memory_indices[pos+1:]:
