@@ -62,6 +62,42 @@ out_and_back
 square_loop
 ```
 
+For longer runs, prefer chaining the same small actions used by the Gradio demo:
+
+```bash
+python scripts/run_vmem_demo_actions.py \
+  --image test_samples/open_door.jpg \
+  --duration-seconds 5 \
+  --pattern forward \
+  --output-root outputs/demo_actions
+```
+
+The Gradio demo uses `4` generated frames per action at `13` fps, so a long run
+is many small actions:
+
+```text
+30 seconds  -> about 98 actions
+180 seconds -> about 585 actions
+```
+
+Examples:
+
+```bash
+# Gentle forward exploration.
+python scripts/run_vmem_demo_actions.py \
+  --image test_samples/open_door.jpg \
+  --duration-seconds 30 \
+  --pattern forward \
+  --output-root outputs/demo_actions
+
+# Small loop-like motion using demo-size actions.
+python scripts/run_vmem_demo_actions.py \
+  --image test_samples/open_door.jpg \
+  --num-actions 40 \
+  --pattern forward,forward,left5,forward,forward,right5 \
+  --output-root outputs/demo_actions
+```
+
 ## Local or CECSL
 
 Run from the VMem repo after activating the VMem environment:
