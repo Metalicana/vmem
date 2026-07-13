@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from contextlib import nullcontext
 from datetime import datetime
 import json
@@ -43,6 +44,22 @@ ACTION_ALIASES = {
     "right": "right5",
     "r10": "right10",
     "right10": "right10",
+}
+TRAJECTORY_ALIASES = {
+    "pattern": "pattern",
+    "forward": "forward",
+    "out_and_back": "out_and_back",
+    "square": "square_walk",
+    "square_walk": "square_walk",
+    "pan": "pan_180",
+    "pan_180": "pan_180",
+    "left_right_180": "pan_180",
+    "sweep_180": "pan_180",
+    "spin": "spin_360",
+    "spin_360": "spin_360",
+    "rotate_360": "spin_360",
+    "random": "random_walk",
+    "random_walk": "random_walk",
 }
 
 
@@ -127,9 +144,69 @@ def _parse_pattern(pattern: str) -> list[str]:
     return actions
 
 
+def _repeat_to_length(base: Sequence[str], *, num_actions: int) -> list[str]:
+    if not base:
+        raise ValueError("trajectory action template must include at least one action")
+    return [base[idx % len(base)] for idx in range(num_actions)]
+
+
 def _expand_actions(pattern: str, *, num_actions: int) -> list[str]:
     base = _parse_pattern(pattern)
-    return [base[idx % len(base)] for idx in range(num_actions)]
+    return _repeat_to_length(base, num_actions=num_actions)
+
+
+def _canonical_trajectory(name: str) -> str:
+    key = name.strip().lower()
+    if key not in TRAJECTORY_ALIASES:
+        raise ValueError(
+            f"Unsupported trajectory {name!r}. "
+            f"Expected one of {sorted(TRAJECTORY_ALIASES)}"
+        )
+    return TRAJECTORY_ALIASES[key]
+
+
+def _expand_trajectory_actions(args) -> list[str]:
+    trajectory = _canonical_trajectory(args.trajectory)
+    if trajectory == "pattern":
+        return _expand_actions(args.pattern, num_actions=args.num_actions)
+    if trajectory == "forward":
+        return _repeat_to_length(["forward"], num_actions=args.num_actions)
+    if trajectory == "out_and_back":
+        base = ["forward"] * 20 + ["backward"] * 20
+        return _repeat_to_length(base, num_actions=args.num_actions)
+    if trajectory == "square_walk":
+        side = ["forward"] * 10
+        right_angle_turn = ["right10"] * 9
+        base = []
+        for _ in range(4):
+            base.extend(side)
+            base.extend(right_angle_turn)
+        return _repeat_to_length(base, num_actions=args.num_actions)
+    if trajectory == "pan_180":
+        base = ["left10"] * 18 + ["right10"] * 36 + ["left10"] * 18
+        return _repeat_to_length(base, num_actions=args.num_actions)
+    if trajectory == "spin_360":
+        return _repeat_to_length(["right10"] * 36, num_actions=args.num_actions)
+    if trajectory == "random_walk":
+        rng = random.Random(args.seed)
+        population = [
+            "forward",
+            "backward",
+            "left5",
+            "right5",
+            "left10",
+            "right10",
+        ]
+        weights = [0.58, 0.04, 0.16, 0.16, 0.03, 0.03]
+        return [
+            rng.choices(population, weights=weights, k=1)[0]
+            for _ in range(args.num_actions)
+        ]
+    raise ValueError(f"Unsupported trajectory: {args.trajectory}")
+
+
+def _action_histogram(actions: Sequence[str]) -> dict[str, int]:
+    return dict(sorted(Counter(actions).items()))
 
 
 def _num_actions_from_duration(duration_seconds: float, *, fps: float, frames_per_action: int) -> int:
@@ -154,23 +231,33 @@ def _apply_action(navigator, action: str):
 
 
 def _run_name(args, *, num_actions: int) -> str:
-    image_stem = args.image.stem.replace(" ", "_")
+    image_stem = (args.run_id or args.image.stem).replace(" ", "_")
     policy = args.memory_policy
     if args.memory_policy in BUDGETED_MEMORY_POLICIES:
         policy = f"{policy}_B{args.memory_budget}"
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return f"{image_stem}_demo_actions_A{num_actions}_{policy}_{timestamp}"
+    return f"{image_stem}_{args.trajectory}_A{num_actions}_{policy}_{timestamp}"
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--image", type=Path, required=True)
+    parser.add_argument("--run-id")
     parser.add_argument("--output-root", type=Path, default=Path("outputs/demo_actions"))
     parser.add_argument("--config", type=Path, default=Path("configs/inference/inference.yaml"))
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--fps", type=float, default=13.0)
     parser.add_argument("--duration-seconds", type=float)
     parser.add_argument("--num-actions", type=int)
+    parser.add_argument(
+        "--trajectory",
+        choices=sorted(TRAJECTORY_ALIASES),
+        default="pattern",
+        help=(
+            "Named demo-action trajectory. Use pattern to repeat --pattern. "
+            "Other presets are generated from the same Navigator actions."
+        ),
+    )
     parser.add_argument(
         "--pattern",
         default="forward",
@@ -210,6 +297,7 @@ def main() -> None:
     parser.add_argument("--visualize-intermediates", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+    args.trajectory = _canonical_trajectory(args.trajectory)
 
     if args.num_actions is None and args.duration_seconds is None:
         args.num_actions = 3
@@ -234,7 +322,7 @@ def main() -> None:
     ):
         raise ValueError(f"--memory-policy {args.memory_policy} requires --memory-budget >= 2")
 
-    actions = _expand_actions(args.pattern, num_actions=args.num_actions)
+    actions = _expand_trajectory_actions(args)
     expected_frames = 1 + args.num_actions * args.frames_per_action
     expected_seconds = expected_frames / args.fps
     if args.dry_run:
@@ -243,9 +331,12 @@ def main() -> None:
                 {
                     "image": str(args.image),
                     "output_root": str(args.output_root),
+                    "run_id": args.run_id,
                     "num_actions": args.num_actions,
+                    "trajectory": args.trajectory,
                     "pattern": args.pattern,
                     "expanded_action_sample": actions[:20],
+                    "action_histogram": _action_histogram(actions),
                     "expected_frames": expected_frames,
                     "expected_seconds": expected_seconds,
                     "memory_policy": args.memory_policy,
@@ -335,9 +426,13 @@ def main() -> None:
 
     metadata = {
         "image": args.image,
+        "run_id": args.run_id,
         "fps": args.fps,
         "num_actions": args.num_actions,
+        "trajectory": args.trajectory,
         "pattern": args.pattern,
+        "action_histogram": _action_histogram(actions),
+        "expanded_action_prefix": actions[: min(40, len(actions))],
         "expected_frames": expected_frames,
         "actual_frames": len(pipeline.pil_frames),
         "actual_seconds": len(pipeline.pil_frames) / args.fps,

@@ -80,6 +80,18 @@ is many small actions:
 180 seconds -> about 585 actions
 ```
 
+Named trajectory presets are available for deterministic long-horizon runs:
+
+```text
+pattern       repeat --pattern exactly
+forward       forward-only exploration
+out_and_back  repeated forward/backward revisit path
+square_walk   forward sides plus 90 degree right turns
+pan_180       left-right 180 degree sweep
+spin_360      repeated 360 degree rotation
+random_walk   seeded random walk over demo actions
+```
+
 Examples:
 
 ```bash
@@ -96,6 +108,37 @@ python scripts/run_vmem_demo_actions.py \
   --num-actions 40 \
   --pattern forward,forward,left5,forward,forward,right5 \
   --output-root outputs/demo_actions
+```
+
+First unbounded 60-second sanity pass:
+
+```bash
+python scripts/run_vmem_demo_actions.py \
+  --image test_samples/open_door.jpg \
+  --run-id open_door_square_walk_60s \
+  --trajectory square_walk \
+  --duration-seconds 60 \
+  --memory-policy unbounded \
+  --output-root outputs/demo_actions_60s
+```
+
+The 60-second setting produces about `195` demo actions and `781` frames. To
+launch the five-run unbounded smoke manifest locally or on CECSL:
+
+```bash
+python scripts/run_vmem_demo_manifest.py \
+  manifests/vmem_60s_unbounded_smoke.jsonl \
+  --all \
+  --output-root outputs/demo_actions_60s
+```
+
+To test the manifest without loading VMem:
+
+```bash
+python scripts/run_vmem_demo_manifest.py \
+  manifests/vmem_60s_unbounded_smoke.jsonl \
+  --all \
+  --dry-run
 ```
 
 ## Local or CECSL
@@ -195,3 +238,15 @@ sbatch slurm/newton_vmem_memory_policy_grid.sbatch
 `slurm/newton_vmem_memory_policy_grid.sbatch` is declared as `--array=0-63`.
 If the scene x duration x policy x budget grid has more than 64 jobs, increase
 that array range before submitting.
+
+Unbounded 60-second demo-action manifest:
+
+```bash
+VMEM_REPO_ROOT=$HOME/vmem \
+CONDA_ENV=vmem \
+OUTPUT_ROOT=$HOME/vmem_results/demo_actions_60s \
+sbatch slurm/newton_vmem_demo_manifest.sbatch
+```
+
+`slurm/newton_vmem_demo_manifest.sbatch` is declared as `--array=0-4`, matching
+the five rows in `manifests/vmem_60s_unbounded_smoke.jsonl`.

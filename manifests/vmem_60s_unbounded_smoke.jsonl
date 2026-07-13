@@ -1,0 +1,6 @@
+# First long-horizon VMem sanity pass: official sample images, unbounded memory, 60 seconds.
+{"run_id": "open_door_square_walk_60s", "image": "test_samples/open_door.jpg", "trajectory": "square_walk", "duration_seconds": 60, "memory_policy": "unbounded", "seed": 101}
+{"run_id": "living_room_out_and_back_60s", "image": "test_samples/living_room.jpg", "trajectory": "out_and_back", "duration_seconds": 60, "memory_policy": "unbounded", "seed": 102}
+{"run_id": "oxford_pan_180_60s", "image": "test_samples/oxford.jpg", "trajectory": "pan_180", "duration_seconds": 60, "memory_policy": "unbounded", "seed": 103}
+{"run_id": "changi_spin_360_60s", "image": "test_samples/changi.jpg", "trajectory": "spin_360", "duration_seconds": 60, "memory_policy": "unbounded", "seed": 104}
+{"run_id": "arc_random_walk_60s", "image": "test_samples/arc_de_tromphe.jpeg", "trajectory": "random_walk", "duration_seconds": 60, "memory_policy": "unbounded", "seed": 105}
