@@ -1,0 +1,4 @@
+# Repo-native VMem sample images, unbounded memory, quick 10-second sanity runs.
+{"run_id": "jesus_pan_180_10s", "image": "test_samples/jesus.jpg", "trajectory": "pan_180", "duration_seconds": 10, "memory_policy": "unbounded", "seed": 301}
+{"run_id": "living_room_out_and_back_10s", "image": "test_samples/living_room.jpg", "trajectory": "out_and_back", "duration_seconds": 10, "memory_policy": "unbounded", "seed": 302}
+{"run_id": "oxford_pan_180_10s", "image": "test_samples/oxford.jpg", "trajectory": "pan_180", "duration_seconds": 10, "memory_policy": "unbounded", "seed": 303}
