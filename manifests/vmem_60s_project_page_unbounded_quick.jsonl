@@ -1,0 +1,5 @@
+# Curated VMem project-page seeds, unbounded memory, 60 seconds.
+# These are closer to the scenes showcased on https://v-mem.github.io/ than the repo's open_door square walk.
+{"run_id": "project_office_out_and_back_60s", "image": "test_samples/vmem_project_page/input_0_resized.webp", "trajectory": "out_and_back", "duration_seconds": 60, "memory_policy": "unbounded", "seed": 201}
+{"run_id": "project_temple_gate_pan_180_60s", "image": "test_samples/vmem_project_page/input_1_resized.webp", "trajectory": "pan_180", "duration_seconds": 60, "memory_policy": "unbounded", "seed": 202}
+{"run_id": "project_palace_pan_180_60s", "image": "test_samples/vmem_project_page/input_3_resized.webp", "trajectory": "pan_180", "duration_seconds": 60, "memory_policy": "unbounded", "seed": 203}
