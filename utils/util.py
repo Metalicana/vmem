@@ -1292,7 +1292,16 @@ class Surfel:
 
 
 class Octree:
-    def __init__(self, points, indices=None, bbox=None, max_points=10):
+    def __init__(
+        self,
+        points,
+        indices=None,
+        bbox=None,
+        max_points=10,
+        depth=0,
+        max_depth=32,
+        min_half_size=1e-8,
+    ):
         self.points = points
         if indices is None:
             indices = np.arange(points.shape[0])
@@ -1309,32 +1318,63 @@ class Octree:
 
         self.children = []  # 存储子节点
         self.max_points = max_points
+        self.depth = depth
+        self.max_depth = max_depth
+        self.min_half_size = min_half_size
 
-        if len(self.indices) > self.max_points:
+        if (
+            len(self.indices) > self.max_points
+            and self.depth < self.max_depth
+            and np.isfinite(self.half_size)
+            and self.half_size > self.min_half_size
+        ):
             self.subdivide()
 
     def subdivide(self):
 
         cx, cy, cz = self.center
         hs = self.half_size / 2
+        if not np.isfinite(hs) or hs <= self.min_half_size:
+            return
 
-        offsets = np.array([[dx, dy, dz] for dx in (-hs, hs) 
-                                       for dy in (-hs, hs) 
-                                       for dz in (-hs, hs)])
-        for offset in offsets:
-            child_center = self.center + offset
-            child_indices = []
-  
-            for idx in self.indices:
-                p = self.points[idx]
-                if np.all(np.abs(p - child_center) <= hs):
-                    child_indices.append(idx)
-            child_indices = np.array(child_indices)
-            if len(child_indices) > 0:
-                child = Octree(self.points, indices=child_indices, bbox=(child_center, hs), max_points=self.max_points)
-                self.children.append(child)
-  
-        self.indices = None
+        child_indices = [[] for _ in range(8)]
+        for idx in self.indices:
+            p = self.points[idx]
+            octant = (
+                (4 if p[0] >= cx else 0)
+                + (2 if p[1] >= cy else 0)
+                + (1 if p[2] >= cz else 0)
+            )
+            child_indices[octant].append(idx)
+
+        offsets = np.array(
+            [
+                [
+                    hs if octant & 4 else -hs,
+                    hs if octant & 2 else -hs,
+                    hs if octant & 1 else -hs,
+                ]
+                for octant in range(8)
+            ]
+        )
+        for octant, indices in enumerate(child_indices):
+            if not indices:
+                continue
+            indices = np.array(indices)
+            child_center = self.center + offsets[octant]
+            child = Octree(
+                self.points,
+                indices=indices,
+                bbox=(child_center, hs),
+                max_points=self.max_points,
+                depth=self.depth + 1,
+                max_depth=self.max_depth,
+                min_half_size=self.min_half_size,
+            )
+            self.children.append(child)
+
+        if self.children:
+            self.indices = None
 
     def sphere_intersects_node(self, center, r):
 
