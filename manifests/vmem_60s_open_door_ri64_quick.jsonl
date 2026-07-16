@@ -1,0 +1,2 @@
+# Same trajectory as the first 60s unbounded run, with budgeted rarity x irreplaceability memory.
+{"run_id": "open_door_square_walk_60s_ri64", "image": "test_samples/open_door.jpg", "trajectory": "square_walk", "duration_seconds": 60, "memory_policy": "rarity_irreplaceability", "memory_budget": 64, "seed": 101}
