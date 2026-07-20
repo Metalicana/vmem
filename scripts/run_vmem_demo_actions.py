@@ -55,9 +55,16 @@ TRAJECTORY_ALIASES = {
     "pan_180": "pan_180",
     "left_right_180": "pan_180",
     "sweep_180": "pan_180",
+    "pan_90": "pan_90",
+    "left_right_90": "pan_90",
+    "sweep_90": "pan_90",
+    "pan_45": "pan_45",
+    "left_right_45": "pan_45",
+    "sweep_45": "pan_45",
     "spin": "spin_360",
     "spin_360": "spin_360",
     "rotate_360": "spin_360",
+    "local_loop": "local_loop",
     "random": "random_walk",
     "random_walk": "random_walk",
 }
@@ -185,8 +192,17 @@ def _expand_trajectory_actions(args) -> list[str]:
     if trajectory == "pan_180":
         base = ["left10"] * 18 + ["right10"] * 36 + ["left10"] * 18
         return _repeat_to_length(base, num_actions=args.num_actions)
+    if trajectory == "pan_90":
+        base = ["left10"] * 9 + ["right10"] * 18 + ["left10"] * 9
+        return _repeat_to_length(base, num_actions=args.num_actions)
+    if trajectory == "pan_45":
+        base = ["left5"] * 9 + ["right5"] * 18 + ["left5"] * 9
+        return _repeat_to_length(base, num_actions=args.num_actions)
     if trajectory == "spin_360":
         return _repeat_to_length(["right10"] * 36, num_actions=args.num_actions)
+    if trajectory == "local_loop":
+        base = ["forward"] * 4 + ["left5"] * 4 + ["backward"] * 4 + ["right5"] * 4
+        return _repeat_to_length(base, num_actions=args.num_actions)
     if trajectory == "random_walk":
         rng = random.Random(args.seed)
         population = [

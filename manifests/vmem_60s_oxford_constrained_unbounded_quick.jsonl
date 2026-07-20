@@ -1,0 +1,2 @@
+# First constrained 60-second Oxford rerun. No forward walk, just a 90-degree sweep and return.
+{"run_id": "oxford_pan_90_60s", "image": "test_samples/oxford.jpg", "trajectory": "pan_90", "duration_seconds": 60, "memory_policy": "unbounded", "seed": 401}
