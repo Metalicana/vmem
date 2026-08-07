@@ -27,11 +27,13 @@ MEMORY_POLICIES = (
     "fifo",
     "rarity_irreplaceability",
     "slam_covisibility",
+    "mce",
 )
 BUDGETED_MEMORY_POLICIES = (
     "fifo",
     "rarity_irreplaceability",
     "slam_covisibility",
+    "mce",
 )
 
 

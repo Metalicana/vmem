@@ -27,9 +27,12 @@ from modeling import VMemWrapper, VMemModel, VMemModelParams
 from modeling.memory_policies import (
     BUDGETED_MEMORY_POLICIES,
     SUPPORTED_MEMORY_POLICIES,
+    DinoFeatureExtractor,
     FrameMemoryBuffer,
+    compute_marginal_coverage_eviction_scores,
     compute_rarity_irreplaceability_scores,
     compute_slam_covisibility_scores,
+    historical_query_medoids,
 )
 from modeling.modules.autoencoder import AutoEncoder
 from modeling.sampling import DDPMDiscretization, DiscreteDenoiser, create_samplers
@@ -214,7 +217,7 @@ class VMemPipeline:
             )
 
     def _pinned_memory_frames(self):
-        if self.memory_policy in {"rarity_irreplaceability", "slam_covisibility"}:
+        if self.memory_policy in {"rarity_irreplaceability", "slam_covisibility", "mce"}:
             return {0}
         return set()
 
@@ -252,6 +255,88 @@ class VMemPipeline:
             features[frame_idx] = feature.reshape(-1)
         return features
 
+    def _dino_extractor_instance(self):
+        if getattr(self, "_dino_extractor", None) is None:
+            self._dino_extractor = DinoFeatureExtractor(device=self.device)
+        return self._dino_extractor
+
+    def _dino_feature_dict(self, frame_indices):
+        """K_vis features (Sec. 3.1): calibrated DINO similarity between views.
+
+        Cached per pipeline instance in ``self._dino_feature_cache`` so
+        repeated eviction calls over a growing frame set don't re-encode
+        frames whose PIL image hasn't changed.
+        """
+        if getattr(self, "_dino_feature_cache", None) is None:
+            self._dino_feature_cache = {}
+        missing = [
+            int(idx)
+            for idx in frame_indices
+            if int(idx) not in self._dino_feature_cache and 0 <= int(idx) < len(self.pil_frames)
+        ]
+        if missing:
+            extractor = self._dino_extractor_instance()
+            encoded = extractor.encode_pil_images([self.pil_frames[idx] for idx in missing])
+            for frame_idx, feature in zip(missing, encoded):
+                self._dino_feature_cache[frame_idx] = feature
+        return {
+            int(idx): self._dino_feature_cache[int(idx)]
+            for idx in frame_indices
+            if int(idx) in self._dino_feature_cache
+        }
+
+    def _surfel_geometric_support(self, query_frame_indices, candidate_frame_indices):
+        """K_geo (Sec. 3.1): VMem's native visible-surface/surfel support.
+
+        For each query pose, renders the current surfel index into that view
+        (same z-buffered pass used for context retrieval,
+        ``render_surfels_to_image``) and aggregates the per-pixel
+        cos_value/(1+depth) signal per candidate frame via
+        ``process_retrieved_spatial_information`` -- the same normalized
+        visible-surface distribution VMem already computes for retrieval, not
+        an FOV-overlap proxy. Candidates absent from a query's render (fully
+        occluded / no surfel keyed to them) score 0 for that query.
+
+        Returns a (len(query_frame_indices) x len(candidate_frame_indices))
+        matrix with values in [0, 1].
+        """
+        candidate_frame_indices = [int(idx) for idx in candidate_frame_indices]
+        col_of_frame = {frame_idx: col for col, frame_idx in enumerate(candidate_frame_indices)}
+        support = np.zeros((len(query_frame_indices), len(candidate_frame_indices)), dtype=np.float64)
+        if not self.surfels:
+            return support
+
+        valid_surfel_Ks = [K for K in self.surfel_Ks if K is not None]
+        fallback_K = np.mean(valid_surfel_Ks, axis=0) if valid_surfel_Ks else None
+
+        for row, query_idx in enumerate(query_frame_indices):
+            query_idx = int(query_idx)
+            if not (0 <= query_idx < len(self.c2ws)):
+                continue
+            focal_length = None
+            if 0 <= query_idx < len(self.surfel_Ks):
+                focal_length = self.surfel_Ks[query_idx]
+            if focal_length is None:
+                focal_length = fallback_K
+            if focal_length is None:
+                continue
+
+            transformed_c2w = self.get_transformed_c2ws(self.c2ws[query_idx])
+            retrieved_info = self.render_surfels_to_image(
+                self.surfels,
+                transformed_c2w,
+                [focal_length * 0.65] * 2,
+                principal_points=(int(self.config.surfel.width / 2), int(self.config.surfel.height / 2)),
+                image_width=int(self.config.surfel.width),
+                image_height=int(self.config.surfel.height),
+            )
+            timestep_weights, _ = self.process_retrieved_spatial_information(retrieved_info)
+            for frame_idx, weight in timestep_weights:
+                if frame_idx in col_of_frame:
+                    support[row, col_of_frame[frame_idx]] = float(weight)
+
+        return support
+
     def _compute_memory_scores(self, frame_indices):
         frame_indices = sorted(
             {int(idx) for idx in frame_indices if 0 <= int(idx) < len(self.c2ws)}
@@ -274,6 +359,24 @@ class VMemPipeline:
                 c2ws=np.asarray(self.c2ws),
                 pinned_frames=pinned_frames,
                 latent_features=visual_features,
+                return_details=True,
+            )
+        if self.memory_policy == "mce":
+            # Q_ctrl (known future camera poses) is not yet threaded through
+            # from generate_trajectory_frames' driving trajectory -- Q_hist
+            # alone (lambda_hist -> 1) until that wiring lands.
+            dino_features = self._dino_feature_dict(frame_indices)
+            hist_query_frame_indices, _ = historical_query_medoids(frame_indices, dino_features)
+            hist_geo_matrix = self._surfel_geometric_support(
+                hist_query_frame_indices, frame_indices
+            )
+            return compute_marginal_coverage_eviction_scores(
+                memory_frame_indices=frame_indices,
+                budget=self.memory_budget,
+                hist_query_frame_indices=hist_query_frame_indices,
+                hist_geo_matrix=hist_geo_matrix,
+                dino_features=dino_features,
+                forced_keep_frames=pinned_frames,
                 return_details=True,
             )
         return None, {}
