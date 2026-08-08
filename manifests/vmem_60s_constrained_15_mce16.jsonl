@@ -1,0 +1,17 @@
+# Constrained VMem revisit suite: repo-native images, mce memory, budget 16, 60 seconds.
+# Trajectories avoid long open-world walks and focus on revisit/remembering behavior.
+{"run_id": "oxford_pan_45_60s_mce16", "image": "test_samples/oxford.jpg", "trajectory": "pan_45", "duration_seconds": 60, "memory_policy": "mce", "memory_budget": 16, "seed": 501}
+{"run_id": "oxford_pan_90_60s_mce16", "image": "test_samples/oxford.jpg", "trajectory": "pan_90", "duration_seconds": 60, "memory_policy": "mce", "memory_budget": 16, "seed": 502}
+{"run_id": "oxford_local_loop_60s_mce16", "image": "test_samples/oxford.jpg", "trajectory": "local_loop", "duration_seconds": 60, "memory_policy": "mce", "memory_budget": 16, "seed": 503}
+{"run_id": "jesus_pan_45_60s_mce16", "image": "test_samples/jesus.jpg", "trajectory": "pan_45", "duration_seconds": 60, "memory_policy": "mce", "memory_budget": 16, "seed": 511}
+{"run_id": "jesus_pan_90_60s_mce16", "image": "test_samples/jesus.jpg", "trajectory": "pan_90", "duration_seconds": 60, "memory_policy": "mce", "memory_budget": 16, "seed": 512}
+{"run_id": "jesus_local_loop_60s_mce16", "image": "test_samples/jesus.jpg", "trajectory": "local_loop", "duration_seconds": 60, "memory_policy": "mce", "memory_budget": 16, "seed": 513}
+{"run_id": "living_room_pan_45_60s_mce16", "image": "test_samples/living_room.jpg", "trajectory": "pan_45", "duration_seconds": 60, "memory_policy": "mce", "memory_budget": 16, "seed": 521}
+{"run_id": "living_room_pan_90_60s_mce16", "image": "test_samples/living_room.jpg", "trajectory": "pan_90", "duration_seconds": 60, "memory_policy": "mce", "memory_budget": 16, "seed": 522}
+{"run_id": "living_room_local_loop_60s_mce16", "image": "test_samples/living_room.jpg", "trajectory": "local_loop", "duration_seconds": 60, "memory_policy": "mce", "memory_budget": 16, "seed": 523}
+{"run_id": "open_door_pan_45_60s_mce16", "image": "test_samples/open_door.jpg", "trajectory": "pan_45", "duration_seconds": 60, "memory_policy": "mce", "memory_budget": 16, "seed": 531}
+{"run_id": "open_door_pan_90_60s_mce16", "image": "test_samples/open_door.jpg", "trajectory": "pan_90", "duration_seconds": 60, "memory_policy": "mce", "memory_budget": 16, "seed": 532}
+{"run_id": "open_door_local_loop_60s_mce16", "image": "test_samples/open_door.jpg", "trajectory": "local_loop", "duration_seconds": 60, "memory_policy": "mce", "memory_budget": 16, "seed": 533}
+{"run_id": "changi_pan_45_60s_mce16", "image": "test_samples/changi.jpg", "trajectory": "pan_45", "duration_seconds": 60, "memory_policy": "mce", "memory_budget": 16, "seed": 541}
+{"run_id": "changi_pan_90_60s_mce16", "image": "test_samples/changi.jpg", "trajectory": "pan_90", "duration_seconds": 60, "memory_policy": "mce", "memory_budget": 16, "seed": 542}
+{"run_id": "changi_local_loop_60s_mce16", "image": "test_samples/changi.jpg", "trajectory": "local_loop", "duration_seconds": 60, "memory_policy": "mce", "memory_budget": 16, "seed": 543}

@@ -1,7 +1,21 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python3 -)"
+      "Bash(python3 -)",
+      "Bash(python3 -m json.tool)",
+      "Bash(python3 -c ' *)",
+      "Bash(python3 -m py_compile modeling/pipeline.py modeling/memory_policies.py scripts/run_vmem_image_trajectory.py scripts/run_vmem_demo_actions.py scripts/run_context_memory_vmem.py)",
+      "Bash(python3 -m unittest tests.test_kcenter -v)",
+      "Bash(python3 -m py_compile scripts/audit_manifest_completion.py)",
+      "Bash(python3 -m py_compile scripts/score_revisit_lpips.py)",
+      "Bash(python3 -c \"import torch\")",
+      "Bash(python3 -m unittest tests.test_mce tests.test_kcenter -v)",
+      "Bash(python3 -m py_compile modeling/pipeline.py modeling/memory_policies.py scripts/*.py)",
+      "Bash(grep -v \"^$\")",
+      "Bash(timeout 8 ssh -o BatchMode=yes -o ConnectTimeout=5 ab575577@10.171.42.25 'echo connected')",
+      "Bash(ssh -o BatchMode=yes -o ConnectTimeout=5 ab575577@10.171.42.25 'echo connected')",
+      "Bash(sw_vers)",
+      "Read(//Users/metalicana/.ssh/**)"
     ]
   }
 }

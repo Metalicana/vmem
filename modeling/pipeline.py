@@ -29,6 +29,7 @@ from modeling.memory_policies import (
     SUPPORTED_MEMORY_POLICIES,
     DinoFeatureExtractor,
     FrameMemoryBuffer,
+    compute_kcenter_coreset_scores,
     compute_marginal_coverage_eviction_scores,
     compute_rarity_irreplaceability_scores,
     compute_slam_covisibility_scores,
@@ -217,7 +218,12 @@ class VMemPipeline:
             )
 
     def _pinned_memory_frames(self):
-        if self.memory_policy in {"rarity_irreplaceability", "slam_covisibility", "mce"}:
+        if self.memory_policy in {
+            "rarity_irreplaceability",
+            "slam_covisibility",
+            "mce",
+            "kcenter_coreset",
+        }:
             return {0}
         return set()
 
@@ -377,6 +383,16 @@ class VMemPipeline:
                 hist_geo_matrix=hist_geo_matrix,
                 dino_features=dino_features,
                 forced_keep_frames=pinned_frames,
+                return_details=True,
+            )
+        if self.memory_policy == "kcenter_coreset":
+            dino_features = self._dino_feature_dict(frame_indices)
+            return compute_kcenter_coreset_scores(
+                memory_frame_indices=frame_indices,
+                c2ws=np.asarray(self.c2ws),
+                budget=self.memory_budget,
+                forced_keep_frames=pinned_frames,
+                dino_features=dino_features,
                 return_details=True,
             )
         return None, {}

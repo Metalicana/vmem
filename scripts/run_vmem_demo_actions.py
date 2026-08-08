@@ -24,12 +24,14 @@ MEMORY_POLICIES = (
     "rarity_irreplaceability",
     "slam_covisibility",
     "mce",
+    "kcenter_coreset",
 )
 BUDGETED_MEMORY_POLICIES = (
     "fifo",
     "rarity_irreplaceability",
     "slam_covisibility",
     "mce",
+    "kcenter_coreset",
 )
 ACTION_ALIASES = {
     "f": "forward",

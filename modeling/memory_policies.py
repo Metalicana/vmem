@@ -10,12 +10,14 @@ SUPPORTED_MEMORY_POLICIES = (
     "rarity_irreplaceability",
     "slam_covisibility",
     "mce",
+    "kcenter_coreset",
 )
 BUDGETED_MEMORY_POLICIES = (
     "fifo",
     "rarity_irreplaceability",
     "slam_covisibility",
     "mce",
+    "kcenter_coreset",
 )
 
 
@@ -622,6 +624,161 @@ def compute_marginal_coverage_eviction_scores(
             "mce_num_hist_queries": num_hist,
             "mce_num_ctrl_queries": num_ctrl,
             "mce_hist_query_frames": [int(f) for f in hist_query_frame_indices],
+        }
+
+    return (scores, details) if return_details else scores
+
+
+def compute_kcenter_coreset_scores(
+    memory_frame_indices,
+    c2ws,
+    budget,
+    archive_frame_indices=None,
+    forced_keep_frames=None,
+    dino_features=None,
+    visual_weight=0.5,
+    pose_weight=0.5,
+    return_details=False,
+):
+    """Greedy k-center coreset selection: representation-agnostic, ported
+    directly from MemCam's ``compute_kcenter_coreset_scores`` since it only
+    needs a distance/similarity between candidates, not a backbone-specific
+    cue. Repeatedly adds the candidate nearest to the archive point currently
+    farthest from any already-selected center, minimizing the maximum
+    distance from any archive point to its nearest retained memory item.
+    """
+    memory_frame_indices = list(memory_frame_indices)
+    archive_frame_indices = list(archive_frame_indices or memory_frame_indices)
+    forced_keep_frames = set(forced_keep_frames or [])
+    if budget is None:
+        raise ValueError("kcenter_coreset requires an explicit memory budget")
+    if budget <= 0:
+        raise ValueError("kcenter_coreset budget must be positive")
+    if not memory_frame_indices:
+        return ({}, {}) if return_details else {}
+
+    use_visual = dino_features is not None and float(visual_weight) > 0.0
+    if use_visual:
+        missing_features = [
+            frame_idx
+            for frame_idx in set(memory_frame_indices) | set(archive_frame_indices)
+            if frame_idx not in dino_features
+        ]
+        if missing_features:
+            raise ValueError(f"Missing k-center DINO features for frames: {missing_features[:10]}")
+
+    if len(memory_frame_indices) <= budget:
+        scores = {
+            frame_idx: float("inf") if frame_idx in forced_keep_frames else 1.0
+            for frame_idx in memory_frame_indices
+        }
+        details = {
+            frame_idx: {
+                "score": scores[frame_idx],
+                "kcenter_selected": True,
+                "kcenter_forced_keep": frame_idx in forced_keep_frames,
+                "kcenter_rank": index,
+                "kcenter_radius": 0.0,
+                "kcenter_archive_size": len(archive_frame_indices),
+            }
+            for index, frame_idx in enumerate(memory_frame_indices)
+        }
+        return (scores, details) if return_details else scores
+
+    components = []
+    if use_visual:
+        visual_similarity = _feature_cosine_similarity_cross(
+            archive_frame_indices, memory_frame_indices, dino_features
+        )
+        visual_distance = np.clip((1.0 - visual_similarity) / 2.0, 0.0, 1.0)
+        components.append((float(visual_weight), visual_distance))
+
+    if pose_weight:
+        pose_distance = pose_distances(c2ws, archive_frame_indices, memory_frame_indices)
+        pose_distance = 1.0 - np.exp(-pose_distance)
+        components.append((float(pose_weight), pose_distance))
+
+    if not components:
+        raise ValueError("kcenter_coreset needs at least one positive distance component")
+
+    total_weight = max(sum(weight for weight, _ in components), 1e-12)
+    distance = sum(weight * matrix for weight, matrix in components) / total_weight
+
+    frame_to_col = {frame_idx: col for col, frame_idx in enumerate(memory_frame_indices)}
+    forced_cols = [
+        frame_to_col[frame_idx] for frame_idx in memory_frame_indices if frame_idx in forced_keep_frames
+    ]
+
+    selected_cols = []
+    selected_set = set()
+    for col in forced_cols:
+        if col not in selected_set:
+            selected_set.add(col)
+            selected_cols.append(col)
+
+    if selected_cols:
+        covered_distance = np.min(distance[:, selected_cols], axis=1)
+    else:
+        first_col = int(np.argmin(np.mean(distance, axis=0)))
+        selected_set.add(first_col)
+        selected_cols.append(first_col)
+        covered_distance = distance[:, first_col].copy()
+
+    while len(selected_cols) < min(int(budget), len(memory_frame_indices)):
+        farthest_archive_row = int(np.argmax(covered_distance))
+        candidate_order = np.argsort(distance[farthest_archive_row])
+        best_col = None
+        for col in candidate_order:
+            col = int(col)
+            if col not in selected_set:
+                best_col = col
+                break
+        if best_col is None:
+            break
+        selected_set.add(best_col)
+        selected_cols.append(best_col)
+        covered_distance = np.minimum(covered_distance, distance[:, best_col])
+
+    selected_frames = [memory_frame_indices[col] for col in selected_cols]
+    selected_frame_set = set(selected_frames)
+    current_radius = float(np.max(covered_distance)) if covered_distance.size else 0.0
+
+    removal_radius_increases = {}
+    for col in selected_cols:
+        other_cols = [other for other in selected_cols if other != col]
+        if other_cols:
+            without_col = np.min(distance[:, other_cols], axis=1)
+            without_radius = float(np.max(without_col))
+        else:
+            without_radius = float("inf")
+        removal_radius_increases[col] = without_radius - current_radius
+
+    scores = {}
+    details = {}
+    for col, frame_idx in enumerate(memory_frame_indices):
+        selected = frame_idx in selected_frame_set
+        forced = frame_idx in forced_keep_frames
+        if forced:
+            score = float("inf")
+        elif selected:
+            score = 1.0 + max(float(removal_radius_increases.get(col, 0.0)), 0.0)
+        else:
+            score = -1.0
+
+        rank = selected_frames.index(frame_idx) if selected else None
+        scores[frame_idx] = float(score)
+        details[frame_idx] = {
+            "score": float(score),
+            "kcenter_selected": bool(selected),
+            "kcenter_forced_keep": bool(forced),
+            "kcenter_rank": rank,
+            "kcenter_radius": current_radius,
+            "kcenter_removal_radius_increase": (
+                float(removal_radius_increases.get(col, 0.0)) if selected else 0.0
+            ),
+            "kcenter_archive_size": len(archive_frame_indices),
+            "kcenter_visual_weight": float(visual_weight if use_visual else 0.0),
+            "kcenter_pose_weight": float(pose_weight),
         }
 
     return (scores, details) if return_details else scores

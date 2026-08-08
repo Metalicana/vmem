@@ -111,9 +111,10 @@ class PointCloudOptimizer(BasePCOptimizer):
 
         # normalize scale if there's less than 1 known pose
         self.im_poses.requires_grad_(False)
-        for p in self.im_poses:
-            print(p.requires_grad)
-            print(p.data)
+        if self.verbose:
+            for p in self.im_poses:
+                print(p.requires_grad)
+                print(p.data)
         n_known_poses = sum((p.requires_grad is False) for p in self.im_poses)
         self.norm_pw_scale = n_known_poses <= 1
 
