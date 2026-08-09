@@ -70,11 +70,37 @@ def _load_manifest_rows(manifest_path: Path) -> list[dict]:
     return rows
 
 
-def _find_run_dir(output_root: Path, run_id: str) -> Path | None:
-    matches = [m for m in output_root.glob(f"{run_id}_*") if (m / "generated.mp4").exists()]
+def _metadata_matches_row(metadata: dict, row: dict) -> bool:
+    if metadata.get("memory_policy") != row.get("memory_policy", "unbounded"):
+        return False
+    expected_budget = row.get("memory_budget")
+    if expected_budget is not None and metadata.get("memory_budget") != expected_budget:
+        return False
+    return True
+
+
+def _find_run_dir(output_root: Path, row: dict) -> Path | None:
+    # A prefix glob on run_id alone is not enough: run_ids across manifests
+    # can be prefixes of each other (unbounded's "oxford_pan_45_60s" is a
+    # strict prefix of fifo64's "oxford_pan_45_60s_fifo64"), so each
+    # candidate's metadata.json must confirm it's actually this row's policy
+    # /budget, not just a differently-suffixed sibling run.
+    run_id = row["run_id"]
+    matches = []
+    for candidate in output_root.glob(f"{run_id}_*"):
+        video_path = candidate / "generated.mp4"
+        metadata_path = candidate / "metadata.json"
+        if not video_path.exists() or not metadata_path.exists():
+            continue
+        try:
+            metadata = json.loads(metadata_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if _metadata_matches_row(metadata, row):
+            matches.append(candidate)
     if not matches:
         return None
-    # Prefer the most recently completed if a run_id somehow matches twice
+    # Prefer the most recently completed if a row somehow matches twice
     # (e.g. a crashed-then-restarted row).
     return max(matches, key=lambda p: p.stat().st_mtime)
 
@@ -140,7 +166,7 @@ def main() -> None:
         policy, budget = _policy_budget_from_filename(manifest_path)
         for row in _load_manifest_rows(manifest_path):
             run_id = row["run_id"]
-            run_dir = _find_run_dir(args.output_root, run_id)
+            run_dir = _find_run_dir(args.output_root, row)
             if run_dir is None:
                 rows_out.append(
                     {"run_id": run_id, "policy": policy, "budget": budget, "status": "missing"}

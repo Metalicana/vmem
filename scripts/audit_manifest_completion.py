@@ -1,10 +1,15 @@
 #!/usr/bin/env python
 """Audit how many rows of one or more manifests actually completed.
 
-Matches each manifest row's run_id against output_root/<run_id>_*/ dirs
-(run_vmem_demo_manifest.py names each run dir "<run_id>_<trajectory>_A<n>_
-<policy>[_B<budget>]_<timestamp>", so a prefix match on run_id is enough).
-A row counts as complete only if its run dir contains generated.mp4.
+Candidate dirs are found via output_root/<run_id>_*/ (run_vmem_demo_manifest.py
+names each run dir "<run_id>_<trajectory>_A<n>_<policy>[_B<budget>]_
+<timestamp>"), but a prefix glob alone is NOT enough to confirm a match:
+run_ids across manifests can be prefixes of each other (e.g. unbounded's
+"oxford_pan_45_60s" is a strict prefix of fifo64's "oxford_pan_45_60s_fifo64"),
+so a naive glob silently double-counts another policy's output as this row's
+completion. Each candidate's metadata.json is checked to confirm its
+memory_policy (and memory_budget, when the row expects one) actually matches
+what this manifest row asked for before counting it complete.
 
 Usage:
   python scripts/audit_manifest_completion.py \
@@ -36,21 +41,40 @@ LABEL_TO_POLICY = {
 }
 
 
-def _load_manifest_run_ids(manifest_path: Path) -> list[str]:
-    run_ids = []
+def _load_manifest_rows(manifest_path: Path) -> list[dict]:
+    rows = []
     with manifest_path.open() as handle:
         for line in handle:
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
-            row = json.loads(line)
-            run_ids.append(row["run_id"])
-    return run_ids
+            rows.append(json.loads(line))
+    return rows
 
 
-def _is_complete(output_root: Path, run_id: str) -> bool:
-    matches = list(output_root.glob(f"{run_id}_*"))
-    return any((match / "generated.mp4").exists() for match in matches)
+def _metadata_matches_row(metadata: dict, row: dict) -> bool:
+    if metadata.get("memory_policy") != row.get("memory_policy", "unbounded"):
+        return False
+    expected_budget = row.get("memory_budget")
+    if expected_budget is not None and metadata.get("memory_budget") != expected_budget:
+        return False
+    return True
+
+
+def _is_complete(output_root: Path, row: dict) -> bool:
+    run_id = row["run_id"]
+    for candidate in output_root.glob(f"{run_id}_*"):
+        video_path = candidate / "generated.mp4"
+        metadata_path = candidate / "metadata.json"
+        if not video_path.exists() or not metadata_path.exists():
+            continue
+        try:
+            metadata = json.loads(metadata_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if _metadata_matches_row(metadata, row):
+            return True
+    return False
 
 
 def _policy_budget_from_filename(manifest_path: Path) -> tuple[str, str]:
@@ -83,18 +107,18 @@ def main() -> None:
     incomplete_by_manifest: dict[str, list[str]] = {}
 
     for manifest_path in sorted(args.manifests):
-        run_ids = _load_manifest_run_ids(manifest_path)
-        completed = [rid for rid in run_ids if _is_complete(args.output_root, rid)]
-        incomplete = [rid for rid in run_ids if rid not in completed]
+        rows = _load_manifest_rows(manifest_path)
+        completed_ids = [row["run_id"] for row in rows if _is_complete(args.output_root, row)]
+        incomplete_ids = [row["run_id"] for row in rows if row["run_id"] not in completed_ids]
         policy, budget = _policy_budget_from_filename(manifest_path)
 
         print(
-            f"{policy:<26}{budget:<8}{len(completed):<12}{len(run_ids):<10}{manifest_path.name}"
+            f"{policy:<26}{budget:<8}{len(completed_ids):<12}{len(rows):<10}{manifest_path.name}"
         )
-        total_completed += len(completed)
-        total_expected += len(run_ids)
-        if incomplete:
-            incomplete_by_manifest[manifest_path.name] = incomplete
+        total_completed += len(completed_ids)
+        total_expected += len(rows)
+        if incomplete_ids:
+            incomplete_by_manifest[manifest_path.name] = incomplete_ids
 
     print("-" * len(header))
     print(f"{'TOTAL':<26}{'':<8}{total_completed:<12}{total_expected:<10}")
