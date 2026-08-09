@@ -1,0 +1,7 @@
+# T&T smoke test: ONE scene (caterpillar), ONE trajectory (pan_45), budget=32, every policy.
+# 5 videos total. Matches what was actually asked for, not a full scene/trajectory grid.
+{"run_id": "caterpillar_pan_45_unbounded", "image": "test_samples/tanks_and_temples/caterpillar.jpg", "trajectory": "pan_45", "duration_seconds": 60, "memory_policy": "unbounded", "seed": 901}
+{"run_id": "caterpillar_pan_45_fifo32", "image": "test_samples/tanks_and_temples/caterpillar.jpg", "trajectory": "pan_45", "duration_seconds": 60, "memory_policy": "fifo", "memory_budget": 32, "seed": 901}
+{"run_id": "caterpillar_pan_45_slam32", "image": "test_samples/tanks_and_temples/caterpillar.jpg", "trajectory": "pan_45", "duration_seconds": 60, "memory_policy": "slam_covisibility", "memory_budget": 32, "seed": 901}
+{"run_id": "caterpillar_pan_45_kcenter32", "image": "test_samples/tanks_and_temples/caterpillar.jpg", "trajectory": "pan_45", "duration_seconds": 60, "memory_policy": "kcenter_coreset", "memory_budget": 32, "seed": 901}
+{"run_id": "caterpillar_pan_45_mce32", "image": "test_samples/tanks_and_temples/caterpillar.jpg", "trajectory": "pan_45", "duration_seconds": 60, "memory_policy": "mce", "memory_budget": 32, "seed": 901}
