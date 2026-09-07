@@ -1,5 +1,11 @@
 # VMem Budgeted Memory Runs
 
+Current transfer/scaling work uses CECSL only. Follow the
+[instrumented CECSL runbook](VMEM_CECSL_EXPERIMENTS.md) for source locks, matched
+pilots and validation. The Mac is code-only; new instrumentation has not been
+executed. General inference and legacy Newton examples below remain available,
+but are not the current locked experiment protocol.
+
 VMem now supports the same fixed-frame-budget policy family used in the MemCam
 and WorldMem experiments:
 
@@ -142,6 +148,106 @@ python scripts/run_vmem_demo_manifest.py \
 ```
 
 ## Local or CECSL
+
+### External Transfer Generation
+
+The current external-backbone test compares **unbounded VMem versus VMem +
+GeoCov-32**. MemCam and WorldMem carry the primary evaluation; the user will
+evaluate these generated videos with VBench later. See the
+[audit and MemCam handoff](VMEM_TRANSFER_AUDIT.md) for the fixed protocol,
+implementation differences and limitations, and the
+[CECSL runbook](VMEM_CECSL_EXPERIMENTS.md) for the full command sequence.
+
+`manifests/vmem_transfer_v1.jsonl` contains 15 paired cases (30 videos): five
+repository images and three constrained paths, each 60 seconds with matched
+seeds and generation settings. After tests pass, freeze it before the Oxford pair:
+
+```bash
+python scripts/audit_vmem_runs.py freeze manifests/vmem_transfer_v1.jsonl \
+  --output outputs/locks/transfer_v1_resources.json
+for job in 0 1; do
+  CUDA_VISIBLE_DEVICES=1 python scripts/run_vmem_demo_manifest.py \
+    manifests/vmem_transfer_v1.jsonl --job-index "$job" \
+    --experiment-lock outputs/locks/transfer_v1_resources.json \
+    --output-root outputs/vmem_transfer_v1_resources || break
+done
+```
+
+Rows 2-29 are the remaining cases. Each run saves its planned actions,
+source/config/input fingerprints, effective config, video and traces. GPU 1 is
+an example selection, not a reservation; use a current GPU status reading. The
+runbook includes completion/provenance validation and measured resource plots;
+run these before requesting rows 2-29. B=32 limits eligibility, not total RAM/VRAM.
+
+### GeoCov Pilot
+
+This earlier RI/GeoCov/revisit pilot is optional diagnostic infrastructure;
+use the external-transfer protocol above for the supporting VMem experiment.
+
+`manifests/vmem_geocov_pilot.jsonl` pairs unbounded VMem with
+`slam_covisibility` (adapted GeoCov, B=32) and `rarity_irreplaceability` (B=32).
+Rows 0/1/2 use Oxford, 3/4/5 Jesus, and 6/7/8 living room. Each group shares
+its seed and the 60-second `pan_45` trajectory. This pans from 0 to +45 to
+-45 and back, a 90-degree total sweep. It generates 781 frames, with ten
+returns to the initial commanded pose, at frames 72, 144, ..., 720.
+
+Start with Oxford unbounded and GeoCov; this loop runs jobs sequentially.
+Select a GPU using a fresh `nvidia-smi` reading. The example selects GPU 1;
+device selection is not a VRAM reservation or allocation limit.
+
+```bash
+for job in 0 1; do
+  CUDA_VISIBLE_DEVICES=1 python scripts/run_vmem_demo_manifest.py \
+    manifests/vmem_geocov_pilot.jsonl --job-index "$job" \
+    --output-root outputs/geocov_pilot
+done
+```
+
+Use indices `1 2` for GeoCov versus RI instead, or `--all` for all nine
+runs sequentially. Add `--dry-run` to validate without model loading.
+The pilot saves PNG frames so image errors do not depend on MP4 compression.
+
+On Newton, the same manifest can use the existing array wrapper:
+
+```bash
+MANIFEST=manifests/vmem_geocov_pilot.jsonl \
+OUTPUT_ROOT="$HOME/vmem_results/geocov_pilot" \
+sbatch --array=0-1%1 slurm/newton_vmem_demo_manifest.sbatch
+```
+
+After generation, evaluate on CPU (no generation GPU needed):
+
+```bash
+python scripts/evaluate_vmem_revisits.py manifests/vmem_geocov_pilot.jsonl \
+  --output-root outputs/geocov_pilot --csv-out outputs/geocov_pilot/revisits.csv
+```
+
+This writes per-run means and final-return RGB MSE, plus every return in
+`revisits.returns.csv`. RGB MSE is mean squared pixel error over RGB in [0, 1].
+Add `--lpips` for full-resolution AlexNet LPIPS (requires `lpips` and its
+weights); CPU is the default. `--traces-only` skips image loading and metrics.
+Retention and selection columns track frame 0 in the retrieval event for
+each return, making retained-but-unused evidence visible. A missing trace
+stays unknown; a path without an actual return is not scored as a revisit.
+Old runs without seed metadata are marked `seed_verified=False`.
+
+Interpret this as a small transfer pilot measuring commanded-pose revisit
+consistency. It is not GT novel-view fidelity, FVD, or recovered 3D accuracy.
+`local_loop` is excluded: forward, turn, backward, counter-turn does not
+close in translation. Three scenes and one seed each do not establish a
+general quality improvement; inspect all paired outcomes before expanding.
+
+In VMem, `slam_covisibility` uses the same utility formula as the paper's
+GeoCov but uses VMem image-encoder embeddings (latent fallback), not DINO.
+RI uses those embeddings too. Both pin frame 0, count it toward the budget,
+and protect the newest endpoint. Retrieval still uses VMem's surfel/pose
+selection. Default pruning also changes the surfel index and reconstruction
+history; this is an end-to-end memory intervention, not a retrieval-only
+ablation. Neither strict constant total RAM/VRAM nor constant wall-clock
+retrieval time follows from this implementation: output frames and latent
+history are still accumulated, and the surfel count is variable.
+
+### Context-as-Memory Runs
 
 Run from the VMem repo after activating the VMem environment:
 

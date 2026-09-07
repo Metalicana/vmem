@@ -1,0 +1,288 @@
+# VMem External Transfer: Audit and MemCam Handoff
+
+Date: 2026-09-06. Repository: `/Users/metalicana/projects_summer_2026/vmem`.
+Audited base HEAD: `8bc405e`, plus the uncommitted generation/experiment changes
+described below. No new GPU generation or VBench evaluation was run here.
+
+Current execution boundary: the Mac is code-only. The user runs checks and all
+experiments on CECSL after pushing/pulling the code. The new resource profiler,
+lock validator, inventory and plotter are **implemented but untested**. Historical
+test results below do not validate this instrumentation update.
+
+## Decision
+
+MemCam and WorldMem remain the main experimental test-beds. VMem is a supporting
+external-backbone transfer experiment: does the existing GeoCov controller also
+help a generator that already uses geometric memory retrieval? The central pair
+is **VMem unbounded versus VMem + adapted GeoCov, B=32**. RI, FIFO, MCE, K-center,
+budget sweeps, and a new metric study are not necessary for this transfer test.
+
+External here means another generation/memory architecture. It does not establish
+that these demo images are unseen during training or constitute a held-out dataset.
+There is no VMem quality improvement measured in this workspace yet.
+
+The resource objective is preserved or improved quality/consistency at lower
+**measured** resource cost, not a physical-memory bound inferred from B=32.
+See the [memory ownership audit](VMEM_MEMORY_OWNERSHIP.md) and
+[CECSL execution runbook](VMEM_CECSL_EXPERIMENTS.md) for the implementation and
+the requested user-run checks. The original transfer manifest is unchanged.
+
+## Design Argument for the Paper
+
+Distinguish **query-time context selection** from **persistent archive retention**.
+An archive can grow while a sophisticated retriever chooses only a few references
+for each generation step. GeoCov controls what remains eligible in that archive.
+The intended finding is that archive curation can complement an already careful
+geometric retriever. It is not necessary to portray VMem as a naive baseline.
+
+The VMem project describes querying surfel-indexed views with the target camera,
+then writing newly generated views back to memory. This already includes
+geometry-aware retrieval and surfel merging. [Official project](https://v-mem.github.io/)
+
+The paper uses a camera-conditioned SEVA-derived generator, with an efficient
+LoRA variant using four reference and four target views. It includes real-data
+and cycle-trajectory evaluations, as well as qualitative in-the-wild images.
+Our repeated 60-second demo-action suite is a new transfer protocol, not a
+reproduction of its quantitative benchmark. [VMem paper, Sections 3-4](https://arxiv.org/html/2506.18903v3)
+
+For the proposed two-family introduction, these properties are not mutually
+exclusive: an unbounded archive may also have heuristic or geometric selection.
+Avoid treating VMem's selection mechanism as evidence that its archive is bounded.
+
+## Audit Findings
+
+### 1. The baseline is the audited fork, not verified pristine upstream
+
+The current `get_context_info` still performs surfel rendering, candidate
+allocation, camera-pose ranking and diversity suppression. However, comparison
+against the repository's original `b641beb` implementation shows shared changes:
+empty-render fallback, candidate deduplication, appending pose-ranked eligible
+frames beyond the surfel candidates, context-slot filling, and changed threshold
+initialization. The current behavior also is not literally a plain top-K vote sort.
+
+Both transfer arms use this same implementation. Label the baseline as the
+unbounded VMem implementation in our audited fork. Before claiming equivalence
+to untouched released VMem, perform a separate upstream parity check. This audit
+compared local history; it did not certify the latest upstream code.
+
+Evidence: [pipeline.py](modeling/pipeline.py), `get_context_info` around line 1080;
+`git show b641beb:modeling/pipeline.py`, original lines 630-754.
+
+### 2. Default budgeting changes both retention and scene reconstruction
+
+`surfel_indexed_view_memory` restricts frame eligibility, removes evicted frame
+references from the surfel index, and removes surfels with no surviving references.
+For subsequent reconstruction, bounded policies use retained plus new frames;
+unbounded uses the full history. The checkpoint and retrieval algorithm are shared,
+but the memory state and reconstruction inputs can evolve differently.
+
+This supports an **end-to-end memory-controller** comparison. It cannot isolate
+retrieval selection as the cause of an improvement. Optional `view_context`
+experiments retain full-history geometry and only restrict frame eligibility;
+they are an attribution ablation, not a fully budgeted memory demonstration.
+
+Evidence: [pipeline.py](modeling/pipeline.py), `_prune_surfels_to_memory` line 418,
+`_update_memory_budget` line 444, reconstruction selection around line 1846.
+
+### 3. GeoCov is an adaptation, with no new tuned coefficients
+
+The implementation flag is `slam_covisibility`. It uses pose similarity with
+weight 0.65 and visual cosine similarity with weight 0.35, threshold 0.65,
+three substitute observers, and the same retention utility as the MemCam paper:
+
+```text
+u_i = 1 - min(c_i / 3, 1) + 0.5 / (c_i + 1) + 0.25 * (1 - max_affinity_i)
+```
+
+VMem supplies its CLIP image-encoder embeddings, with a latent fallback, instead
+of MemCam's DINO descriptors. This controller's geometry term is a pose proxy;
+it does not compute surfel co-visibility counts. Surfels are used by VMem retrieval.
+The initial frame is pinned and the newest endpoint protected; both count toward
+B. Utilities are computed once on the prospective bank before batch eviction,
+not recomputed after every removed frame.
+
+Evidence: [memory_policies.py](modeling/memory_policies.py),
+`compute_slam_covisibility_scores` line 294; [pipeline.py](modeling/pipeline.py),
+`_visual_feature_dict`, `_compute_memory_scores`, `_update_memory_budget`.
+
+### 4. B is eligible frames, not total process memory or a fixed surfel count
+
+The runner still accumulates output images, latents, embeddings and pose/depth
+history. Surfel count varies with geometry. Do not claim constant total RAM,
+VRAM, strict surfel count, or constant measured retrieval latency from this hook.
+Current trace fields can verify the eligible bank and surfel/reference counts.
+Recorded CUDA peaks cover PyTorch's allocator in this process, not all GPU use.
+
+Evidence: [pipeline.py](modeling/pipeline.py), persistent lists in `__init__`,
+frame appends around line 1831, and `_record_retrieval_trace`.
+
+The expanded [ownership table](VMEM_MEMORY_OWNERSHIP.md#ownership-table) separates
+generation dependencies from output/diagnostic histories. Notably, evicted
+`surfel_Ks` entries still participate in full-history focal averaging. Global
+indexing, Navigator aliases and view-backed allocations make payload release a
+larger storage change; it is deliberately deferred. This update measures the
+existing implementation rather than silently changing its storage semantics.
+
+### 5. Existing evidence is a diagnostic example, not an improvement result
+
+The locally available `open_door_square_walk_60s` unbounded run has 781 frames
+at 13 fps. Its commanded pose returns near identity at frames 304 and 608.
+In the corresponding retrieval traces, frame 0 remains eligible but is not
+selected at either return. This establishes retained-but-unused anchor evidence
+in this one run. It does not establish causal poisoning, explain all its visible
+failure, or show that GeoCov would improve it. The old metadata does not log seed.
+
+Sources: [actions](open_door_square_walk_60s_square_walk_A195_unbounded_20260713_143244/actions.json),
+[retrieval trace](open_door_square_walk_60s_square_walk_A195_unbounded_20260713_143244/retrieval_trace.json),
+[metadata](open_door_square_walk_60s_square_walk_A195_unbounded_20260713_143244/metadata.json).
+
+### 6. Generation logging and batch isolation have been improved
+
+The runner saves seed, named source/input/config hashes and git commit, planned
+actions in `run_spec.json`, and effective `generation_config.yaml` before model
+loading. The new experiment lock rejects mismatched source/config/input/settings
+before loading. VMem/CUT3R checkpoint files are hashed after loading and compared
+across completed arms. These checks do not cover every dependency or VAE/CLIP
+weight file; preserve the cache and environment.
+
+The new `resource_trace.jsonl` records each generation update, before/after
+pruning counts and component byte estimates, current process RSS, process-local
+PyTorch CUDA allocations/reservations and cumulative peaks. CUDA-synchronized
+wall times separate retrieval, generation, reconstruction and memory update.
+The first two steps are labelled warm-up; accounting overhead is separate.
+Read the [measurement contract](VMEM_MEMORY_OWNERSHIP.md#measurement-contract)
+for exact boundaries, observer overhead, alias attribution and exclusions.
+
+`actions.partial.jsonl` and resource JSONL are appended during generation.
+`run_status.json` marks success or an uncaught failure; abrupt termination can
+leave an unfinished status. These artifacts preserve earlier completed steps,
+but not a recoverable video checkpoint. The full video is still exported at end.
+
+Navigator previously deleted the repository-wide `visualization` directory on
+initialization. It now creates its pipeline's configured directory without
+deleting other jobs' files. Interactive app cleanup remains owned by the app.
+
+## Frozen Generation Protocol
+
+Manifest: [vmem_transfer_v1.jsonl](manifests/vmem_transfer_v1.jsonl).
+Builder: [build_vmem_transfer_manifest.py](scripts/build_vmem_transfer_manifest.py).
+The builder refuses to overwrite an existing protocol file.
+
+| Setting | Value |
+|---|---|
+| Scene inputs | Oxford, Jesus, living room, open door, Changi, from `test_samples` |
+| Camera cases per scene | `pan_45`, `pan_90`, shallow `out_and_back` |
+| Interpretation | `pan_45` spans -45 to +45 degrees; `pan_90` spans -90 to +90 |
+| Translation case | 20 forward, 20 backward; step size 0.02, maximum displacement 0.4 in Navigator units |
+| Duration | 195 actions, 781 output frames, 13 fps, about 60.08 seconds |
+| Generator | Existing checkpoint/config, 576x576, four context/four target slots |
+| Inference | 50 denoising steps, 400 reconstruction iterations, no window override |
+| Memory arms | Unbounded; adapted GeoCov-32, `surfel_indexed_view_memory` |
+| Seeds | One fixed seed per case, identical across its two arms |
+| Size | 15 matched cases across five images; 30 videos, not 30 independent scenes |
+| Main artifacts | MP4, run spec, effective config, actions, retrieval/memory traces, metadata |
+
+The instrumented execution additionally requires an experiment lock and records
+`commanded_path.json`, `resource_trace.jsonl`, partial actions and run status.
+
+No new dataset download, training, feature-model tuning, or Gradio UI automation
+is involved. The runner calls the same Navigator actions as the demo. It excludes
+`local_loop`, whose forward-turn-backward path does not close in translation.
+
+1. Run rows 0 and 1: Oxford `pan_45`, unbounded and GeoCov-32. These are part of
+   the final suite, not throwaway samples. Check both for completed generation,
+   correct length/camera commands, and actual budget enforcement.
+2. Run remaining rows 2-29 if the common generation setup is operational. Keep
+   failures and poor generations in the experiment record. Do not select only
+   scenes/seeds where GeoCov wins or change only one arm's inference settings.
+3. The user will run VBench later. Keep both arms' original full videos and
+   matching frame rate/resolution. No LPIPS/FVD/revisit score is the primary
+   acceptance criterion in this external experiment.
+4. A second paired seed across the same cases can strengthen the result later.
+   It is not a prerequisite for this first transfer pass. Freeze the generation
+   settings before seeing VBench results; do not use metric wins to tune the suite.
+
+If both pilot arms collapse, fix shared implementation problems or revise the
+protocol explicitly and rerun both. An unbounded OOM is a runtime outcome, not
+a quality win. The old RI/GeoCov pilot and revisit scripts remain available as
+optional diagnostics but are not the primary transfer protocol.
+
+## Separate Scaling Protocol
+
+The original pans and shallow revisits cannot establish continued-exploration
+scaling. Two separate versioned manifests add Oxford fixed-region traversals and
+expanding outward excursions followed by returns:
+
+- [30-second pilot](manifests/vmem_scaling_v1_pilot.jsonl): two matched path pairs,
+  four videos, 98 actions each.
+- [180-second extension](manifests/vmem_scaling_v1_extended.jsonl): same two path
+  pairs, 585 actions each; not requested for launch before the pilot is reviewed.
+
+Both use step size 0.02 and seed 701, with the same inference and controller
+settings as transfer_v1. Fixed traversals repeat 8 forward/8 backward actions;
+expanding excursions use 8/8, 16/16, 24/24, etc. Duration prefixes are fixed,
+not selected from quality results. The freeze tool records analytic endpoint
+poses/returns; the inventory checks executed poses against them. A path plotter
+is available for pre-generation inspection. No path checks have been executed
+for this new code yet.
+
+Storage can be sampled at 10/20/30 seconds in the pilot and
+10/20/30/60/120/180 seconds in the long extension. Actual sample time is retained.
+Commanded extent is not measured generated geometric coverage, and this small
+one-dimensional probe is not a general exploration benchmark.
+
+## Commands and Evaluation
+
+Use the [CECSL runbook](VMEM_CECSL_EXPERIMENTS.md), starting with the requested CPU
+unit tests, then freezing a source/config lock, then Oxford rows 0/1. It contains
+the commands for inventory validation, measured resource plots, the remaining
+transfer cases, and the separate scaling pilot. No commands were executed on
+CECSL or Newton here. The legacy Newton wrapper is not the current locked-run
+protocol; all experiments are now designated for CECSL.
+
+One process at a time and explicit GPU selection are not VRAM reservations.
+Choose the device from a fresh status reading and record competing workload
+when interpreting latency. Do not mix old uninstrumented videos into the new
+resource comparison. Do not interpret the mere existence of a directory or
+`metadata.json` as a validated paired run.
+
+VBench-Long has a documented custom-video path supporting six dimensions with
+scene/clip preprocessing. Applicability to these videos remains provisional
+until the user checks preprocessing/coverage on the pilot; this is not the full
+standard prompt-based evaluation. [Official VBench-Long documentation](https://github.com/Vchitect/VBench/blob/master/vbench2_beta_long/README.md)
+Keep revisit consistency distinct from outward-generation quality. No new-view
+exact-index GT, validated CUT3R evaluation, or paired quality result is available.
+
+## Validation and Outstanding Work
+
+- Historical validation before the resource update: 26 CPU tests and all 30
+  transfer manifest dry-run rows passed; the Slurm wrapper passed shell syntax.
+  This does not validate the new instrumentation, locks, scaling or inventory.
+- New tests have been added but not run, respecting the code-only Mac boundary.
+  Model loading, synchronized measurements, CUDA peaks and generation under the
+  new lock require user-run CECSL validation.
+- Inventory and plotting tools are implemented, not measured results. Before
+  publishing, collect validated pairs with decoded video integrity, matching
+  provenance/checkpoints and traced bank limits. Preserve failed/unfinished
+  attempts and explain retries. Quality outcomes remain pending.
+- Unmodified-upstream equivalence, physical memory bounds, and a retrieval-only
+  causal explanation remain unestablished. No generator/retriever algorithm was
+  replaced as part of this generation-protocol update.
+
+## Suggested MemCam Paper Wording
+
+Before results: "We additionally test whether the memory controller transfers
+to a VMem-based generator with surfel-indexed retrieval, using matched 60-second
+rollouts from single images."
+
+If supported by subsequent measurements: "The controller also improves [measured
+dimensions] on VMem, suggesting that archive curation can complement an existing
+geometry-aware retrieval mechanism." Report the actual paired outcomes and the
+VMem embedding adaptation. Do not pre-fill an improvement claim, call these
+results GT reconstruction fidelity, or use them to claim all heuristic memory
+mechanisms fail. Keep the main controlled evidence in MemCam and WorldMem.
+
+This transfer experiment cannot on its own establish that GeoCov's scoring rule
+is superior to other handcrafted eviction rules. That claim belongs to the
+matched-budget spatial-policy comparison in MemCam. Report any actual resource
+savings with their measurement scope, never as a bound on total memory.

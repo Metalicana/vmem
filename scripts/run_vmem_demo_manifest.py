@@ -71,6 +71,7 @@ def _command_for_row(
     config: Path,
     device: str,
     dry_run: bool,
+    experiment_lock: Path | None = None,
 ) -> list[str]:
     unknown_keys = sorted(
         key for key in row if key not in SUPPORTED_KEYS and not key.startswith("_")
@@ -94,6 +95,8 @@ def _command_for_row(
         _append_arg(command, flag, row.get(key))
     if dry_run:
         command.append("--dry-run")
+    if experiment_lock is not None:
+        command.extend(["--experiment-lock", str(experiment_lock)])
     return command
 
 
@@ -125,6 +128,7 @@ def main() -> None:
     parser.add_argument("--config", type=Path, default=Path("configs/inference/inference.yaml"))
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--experiment-lock", type=Path)
     args = parser.parse_args()
 
     rows = _load_manifest(args.manifest)
@@ -137,6 +141,7 @@ def main() -> None:
             config=args.config,
             device=args.device,
             dry_run=args.dry_run,
+            experiment_lock=args.experiment_lock,
         )
         print(
             json.dumps(

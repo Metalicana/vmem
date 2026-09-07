@@ -38,6 +38,7 @@ from modeling.memory_policies import (
 from modeling.modules.autoencoder import AutoEncoder
 from modeling.sampling import DDPMDiscretization, DiscreteDenoiser, create_samplers
 from modeling.modules.conditioner import CLIPConditioner
+from modeling.resource_audit import profiled_phase
 from utils import (encode_vae_image, 
                    encode_image, 
                    visualize_depth, 
@@ -64,7 +65,9 @@ class VMemPipeline:
         self.model = VMemModel(VMemModelParams()).to(device, dtype)
         # load from huggingface
         from huggingface_hub import hf_hub_download
-        state_dict = torch.load(hf_hub_download(repo_id=model_path, filename="vmem_weights.pth"), map_location='cpu')
+        checkpoint_path = hf_hub_download(repo_id=model_path, filename="vmem_weights.pth")
+        self.checkpoint_paths = {"vmem": checkpoint_path}
+        state_dict = torch.load(checkpoint_path, map_location='cpu')
         state_dict = {k.replace("module.", "") if "module." in k else k: v for k, v in state_dict.items()}
                 
             
@@ -96,6 +99,7 @@ class VMemPipeline:
         
 
         surfel_model_path = hf_hub_download(repo_id=self.config.surfel.model_path, filename="cut3r_512_dpt_4_64.pth")
+        self.checkpoint_paths["cut3r"] = surfel_model_path
         print(f"Loading model from {surfel_model_path}...")
         add_path_to_dust3r(surfel_model_path)
         self.surfel_model = ARCroco3DStereo.from_pretrained(surfel_model_path).to(device)
@@ -250,12 +254,15 @@ class VMemPipeline:
 
     def _visual_feature_dict(self, frame_indices):
         features = {}
+        self.memory_descriptor_sources = {"clip_image_encoder": 0, "vae_latent_fallback": 0}
         for frame_idx in frame_indices:
             frame_idx = int(frame_idx)
             if 0 <= frame_idx < len(self.encoder_embeddings):
                 feature = np.asarray(self.encoder_embeddings[frame_idx], dtype=np.float32)
+                self.memory_descriptor_sources["clip_image_encoder"] += 1
             elif 0 <= frame_idx < len(self.latents):
                 feature = np.asarray(self.latents[frame_idx], dtype=np.float32)
+                self.memory_descriptor_sources["vae_latent_fallback"] += 1
             else:
                 continue
             features[frame_idx] = feature.reshape(-1)
@@ -441,6 +448,7 @@ class VMemPipeline:
         self.surfels = retained_surfels
         self.surfel_to_timestep = retained_mapping
 
+    @profiled_phase("memory_update")
     def _update_memory_budget(self, new_frame_indices, protected_frames=None):
         if self.memory_policy == "unbounded":
             return []
@@ -949,6 +957,7 @@ class VMemPipeline:
         return timestep_weights, frame_count
     
     
+    @profiled_phase("retrieval")
     def get_context_info(self, target_c2ws, use_non_maximum_suppression=None):
         """Get context information for novel view synthesis.
         
@@ -1461,6 +1470,7 @@ class VMemPipeline:
         c2ws_transformed[..., :, [1, 2]] *= -1
         return c2ws_transformed
 
+    @profiled_phase("reconstruction")
     def construct_and_store_scene(self, 
             input_images: List[PIL.Image.Image],
             time_indices,
@@ -1782,9 +1792,14 @@ class VMemPipeline:
             self._active_target_frame_indices = list(
                 range(len(self.pil_frames), len(self.pil_frames) + target_length)
             )
+            profiler = getattr(self, "resource_profiler", None)
+            if profiler is not None:
+                profiler.begin_step(self)
             
  
             context_info = self.get_context_info(target_c2ws, use_non_maximum_suppression)
+            if profiler is not None:
+                profiler.begin_phase("generation")
             
             (context_c2ws, 
              context_latents, 
@@ -1841,6 +1856,8 @@ class VMemPipeline:
                 if self.config.inference.visualize:
                     self.pil_frames[-1].save(f"{self.config.visualization_dir}/final_{len(self.pil_frames):07d}.png")
             
+            if profiler is not None:
+                profiler.end_phase("generation")
             # Update scene reconstruction if needed
      
             if (
@@ -1863,6 +1880,8 @@ class VMemPipeline:
             reconstruction_frames = [
                 self.pil_frames[idx] for idx in reconstruction_time_indices
             ]
+            if profiler is not None:
+                profiler.reconstruction_input_indices = list(reconstruction_time_indices)
 
             self.construct_and_store_scene(reconstruction_frames, 
                                         time_indices=context_time_indices,
@@ -1870,11 +1889,15 @@ class VMemPipeline:
                                         niter=self.config.surfel.niter, 
                                         lr=self.config.surfel.lr, 
                                         device=self.device)
+            if profiler is not None:
+                profiler.capture_before_update(self)
             if new_memory_indices:
                 self._update_memory_budget(
                     new_memory_indices,
                     protected_frames={new_memory_indices[-1]},
                 )
+            if profiler is not None:
+                profiler.finish_step(self)
             self.global_step += 1
                         
             if self.config.inference.visualize:

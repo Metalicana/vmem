@@ -7,10 +7,14 @@ import argparse
 from collections import Counter
 from contextlib import nullcontext
 from datetime import datetime
+import hashlib
 import json
+import os
 from pathlib import Path
 import random
+import subprocess
 import sys
+import time
 from typing import Sequence
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -71,6 +75,8 @@ TRAJECTORY_ALIASES = {
     "local_loop": "local_loop",
     "random": "random_walk",
     "random_walk": "random_walk",
+    "fixed_region_v1": "fixed_region_v1",
+    "expanding_excursions_v1": "expanding_excursions_v1",
 }
 
 
@@ -178,6 +184,9 @@ def _canonical_trajectory(name: str) -> str:
 
 def _expand_trajectory_actions(args) -> list[str]:
     trajectory = _canonical_trajectory(args.trajectory)
+    if trajectory in {"fixed_region_v1", "expanding_excursions_v1"}:
+        from scripts.vmem_protocol import scaling_actions
+        return scaling_actions(trajectory, args.num_actions)
     if trajectory == "pattern":
         return _expand_actions(args.pattern, num_actions=args.num_actions)
     if trajectory == "forward":
@@ -259,6 +268,64 @@ def _run_name(args, *, num_actions: int) -> str:
     return f"{image_stem}_{args.trajectory}_A{num_actions}_{policy}_{timestamp}"
 
 
+def _generation_provenance(image_path: Path, config_path: Path) -> dict:
+    source_paths = (
+        "scripts/run_vmem_demo_actions.py", "navigation.py", "modeling/pipeline.py",
+        "modeling/memory_policies.py", "modeling/sampling.py", "utils/util.py",
+        "modeling/resource_audit.py", "scripts/vmem_protocol.py",
+    )
+    try:
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        commit = None
+    return {
+        "git_commit": commit,
+        "source_sha256": {
+            path: hashlib.sha256((REPO_ROOT / path).read_bytes()).hexdigest()
+            for path in source_paths
+        },
+        "image_sha256": hashlib.sha256(image_path.read_bytes()).hexdigest(),
+        "config_sha256": hashlib.sha256(config_path.read_bytes()).hexdigest(),
+        "python_version": sys.version,
+        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+    }
+
+
+def _checkpoint_hashes(pipeline):
+    result = {}
+    for name, path in pipeline.checkpoint_paths.items():
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+        result[name] = digest.hexdigest()
+    return result
+
+
+def _install_failure_log(run_dir, runtime):
+    previous_hook = sys.excepthook
+
+    def on_exception(error_type, error, traceback):
+        status = {"status": "failed", "phase": runtime["phase"],
+                  "error_type": error_type.__name__, "error": str(error)}
+        try:
+            pipeline = runtime.get("pipeline")
+            if pipeline is not None:
+                status["actual_frames"] = len(pipeline.pil_frames)
+                profiler = getattr(pipeline, "resource_profiler", None)
+                if profiler is not None:
+                    profiler.failure(error)
+            (run_dir / "run_status.json").write_text(json.dumps(status, indent=2))
+        finally:
+            previous_hook(error_type, error, traceback)
+
+    sys.excepthook = on_exception
+    (run_dir / "run_status.json").write_text(json.dumps({"status": "running"}))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--image", type=Path, required=True)
@@ -315,6 +382,9 @@ def main() -> None:
     parser.add_argument("--surfel-reconstruction-window", type=int)
     parser.add_argument("--save-frames", action="store_true")
     parser.add_argument("--visualize-intermediates", action="store_true")
+    parser.add_argument("--resource-trace", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--profile-warmup-steps", type=int, default=2)
+    parser.add_argument("--experiment-lock", type=Path)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     args.trajectory = _canonical_trajectory(args.trajectory)
@@ -329,6 +399,8 @@ def main() -> None:
         )
     if args.num_actions <= 0:
         raise ValueError("--num-actions must be positive")
+    if args.profile_warmup_steps < 0:
+        raise ValueError("--profile-warmup-steps must be nonnegative")
     if args.frames_per_action <= 0:
         raise ValueError("--frames-per-action must be positive")
     if args.memory_policy in BUDGETED_MEMORY_POLICIES and (
@@ -367,6 +439,11 @@ def main() -> None:
         )
         return
 
+    from scripts.vmem_protocol import commanded_path, verify_lock
+    provenance = _generation_provenance(args.image, args.config)
+    if args.experiment_lock is not None:
+        provenance["experiment_lock_sha256"] = verify_lock(args.experiment_lock, vars(args), provenance)
+
     _load_runtime_dependencies()
 
     random.seed(args.seed)
@@ -385,8 +462,34 @@ def main() -> None:
     config.model.samples_dir = str(run_dir / "visualization")
     config.inference.visualize = bool(args.visualize_intermediates)
 
+    with (run_dir / "commanded_path.json").open("w", encoding="utf-8") as handle:
+        json.dump(commanded_path(actions, args.step_size, args.frames_per_action, args.fps), handle, indent=2)
+    OmegaConf.save(config, run_dir / "generation_config.yaml")
+    with (run_dir / "run_spec.json").open("w", encoding="utf-8") as handle:
+        json.dump(_json_safe({
+            "arguments": vars(args), "actions": actions, "provenance": provenance,
+            "torch_version": torch.__version__, "cuda_version": torch.version.cuda,
+        }), handle, indent=2)
+
+    runtime = {"phase": "model_load"}
+    _install_failure_log(run_dir, runtime)
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    started_at = time.perf_counter()
     pipeline = VMemPipeline(config, device)
+    runtime["pipeline"] = pipeline
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    model_load_seconds = time.perf_counter() - started_at
+    runtime["phase"] = "checkpoint_hashing"
+    provenance["checkpoint_sha256"] = _checkpoint_hashes(pipeline)
+    with (run_dir / "run_spec.json").open("w", encoding="utf-8") as handle:
+        json.dump(_json_safe({
+            "arguments": vars(args), "actions": actions, "provenance": provenance,
+            "torch_version": torch.__version__, "cuda_version": torch.version.cuda,
+            "resource_schema": "vmem_resources_v1" if args.resource_trace else None,
+        }), handle, indent=2)
     pipeline.configure_memory_budget(
         policy=args.memory_policy,
         budget=args.memory_budget,
@@ -402,9 +505,31 @@ def main() -> None:
     initial_image = _load_vmem_image(args.image, config=config, device=device)
     initial_pose = np.eye(4, dtype=np.float32)
     initial_K = np.array(get_default_intrinsics()[0])
-    navigator.initialize(initial_image, initial_pose, initial_K)
-
     action_records = []
+    if args.resource_trace:
+        from modeling.resource_audit import ResourceProfiler
+        pipeline.resource_profiler = ResourceProfiler(
+            run_dir / "resource_trace.jsonl", device=device, torch_module=torch,
+            fps=args.fps, warmup_steps=args.profile_warmup_steps,
+        )
+        pipeline.resource_profiler.extra_components = lambda: {
+            "navigator_frames": navigator.frames, "navigator_poses": navigator.pose_history,
+            "navigator_current_pose": navigator.current_pose, "navigator_current_K": navigator.current_K,
+            "runner_action_records": action_records, "runner_planned_actions": actions,
+            "runner_initial_image": initial_image,
+        }
+    runtime["phase"] = "initialization"
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    initialization_started = time.perf_counter()
+    navigator.initialize(initial_image, initial_pose, initial_K)
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    initialization_seconds = time.perf_counter() - initialization_started
+    if args.resource_trace:
+        pipeline.resource_profiler.initial_snapshot(pipeline)
+
+    runtime["phase"] = "generation"
     autocast_context = (
         torch.autocast("cuda") if device.type == "cuda" else nullcontext()
     )
@@ -415,17 +540,23 @@ def main() -> None:
                 f"stored_frames={len(pipeline.pil_frames)}",
                 flush=True,
             )
+            action_started_at = time.perf_counter()
+            previous_frame_count = len(pipeline.pil_frames)
             frames = _apply_action(navigator, action)
             action_records.append(
                 {
                     "action_index": action_index,
                     "action": action,
-                    "num_generated_frames": 0 if frames is None else len(frames),
+                    "num_generated_frames": len(pipeline.pil_frames) - previous_frame_count,
                     "total_frames_after": len(pipeline.pil_frames),
                     "current_pose": navigator.current_pose.tolist(),
+                    "wall_seconds": time.perf_counter() - action_started_at,
                 }
             )
+            with (run_dir / "actions.partial.jsonl").open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(action_records[-1]) + "\n")
 
+    runtime["phase"] = "export"
     generated_video_path = run_dir / "generated.mp4"
     _save_pil_video(pipeline.pil_frames, generated_video_path, fps=args.fps)
 
@@ -447,6 +578,20 @@ def main() -> None:
     metadata = {
         "image": args.image,
         "run_id": args.run_id,
+        "seed": args.seed,
+        "provenance": provenance,
+        "model_load_seconds": model_load_seconds,
+        "initialization_seconds": initialization_seconds,
+        "resource_trace": run_dir / "resource_trace.jsonl" if args.resource_trace else None,
+        "profile_warmup_steps": args.profile_warmup_steps,
+        "generation_config": run_dir / "generation_config.yaml",
+        "wall_seconds_including_load_and_export": time.perf_counter() - started_at,
+        "cuda_peak_allocated_bytes": (
+            torch.cuda.max_memory_allocated(device) if device.type == "cuda" else None
+        ),
+        "cuda_peak_reserved_bytes": (
+            torch.cuda.max_memory_reserved(device) if device.type == "cuda" else None
+        ),
         "fps": args.fps,
         "num_actions": args.num_actions,
         "trajectory": args.trajectory,
@@ -475,6 +620,7 @@ def main() -> None:
     metadata_path = run_dir / "metadata.json"
     with metadata_path.open("w", encoding="utf-8") as handle:
         json.dump(_json_safe(metadata), handle, indent=2)
+    (run_dir / "run_status.json").write_text(json.dumps({"status": "complete"}))
 
     print(json.dumps(_json_safe({
         "run_dir": run_dir,
