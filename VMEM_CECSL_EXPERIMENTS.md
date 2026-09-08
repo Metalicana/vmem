@@ -1,20 +1,27 @@
 # VMem CECSL Transfer and Scaling Runbook
 
-Status: implementation prepared, not executed. The Mac is for code only. The
+2026-09-08: the first unbounded pilot was interrupted near the end. Use the
+[recovery-enabled restart runbook](VMEM_RESTART.md) instead of repeating the
+old launch below. It requires new checks, a short pause/resume test, a new lock
+and a separate output root. The 38-test pass below predates recovery changes.
+
+Status (2026-09-07): user-reported CECSL CPU tests passed, 38 tests in 1.732s.
+Real CUDA profiling and the matched generation pilot remain pending. The Mac is for code only. The
 user pushes/pulls and runs every command below on CECSL. No remote jobs were
 launched or terminated by this update. Do not start the full suite before the
 pilot is validated.
 
 ## 1. Check the Code First
 
-After pulling the final code, from the VMem repository in the existing `vmem`
-environment, please run and return the result:
+Completed on CECSL according to the user-provided output on 2026-09-07: all 38
+tests passed, with no skips reported. The command is retained for future code
+changes; proceed to step 2 for this tested version:
 
 ```bash
 CUDA_VISIBLE_DEVICES="" python -m unittest discover -s tests -v
 ```
 
-This is a CPU unit-test request, not generation. New tests cover backing-storage
+This checks CPU unit behavior, not generation. New tests cover backing-storage
 deduplication, timing boundaries with a fake CUDA interface, frozen settings,
 commanded paths, budget/protected-frame checks and failure classification. They
 do not substitute for a real model-loading and instrumented generation check.

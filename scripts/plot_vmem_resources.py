@@ -58,10 +58,13 @@ def plot_resources(inventory, output, include_incomplete, checkpoints):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    attempts = [arm for pair in inventory["pairs"] if pair["validated_pair"] for arm in pair["arms"]]
+    attempts = [arm for pair in inventory["pairs"]
+                if pair["validated_pair"] and pair.get("uninterrupted_resource_pair", True)
+                for arm in pair["arms"]]
     if include_incomplete:
         attempts.extend(item for item in inventory["attempts"]
-                        if item.get("provenance_verified") and item["status"] in {"failed", "unfinished"})
+                        if item.get("provenance_verified") and not item.get("resumed")
+                        and item["status"] in {"failed", "unfinished", "paused"})
     groups, flat, checkpoint_rows = {}, [], []
     for attempt in attempts:
         path = Path(attempt["run_dir"]) / "resource_trace.jsonl"
@@ -139,6 +142,8 @@ def plot_resources(inventory, output, include_incomplete, checkpoints):
     (output / "availability.json").write_text(json.dumps({
         "plotted_cases": len(groups), "measured_steps": len(flat),
         "quality_results": "pending separate user evaluation", "incomplete_included": include_incomplete,
+        "resumed_pairs_excluded": sum(pair["validated_pair"] and not pair.get("uninterrupted_resource_pair", True)
+                                      for pair in inventory["pairs"]),
     }, indent=2))
     print(f"Plotted {len(groups)} measured cases. No plot is created for missing data.")
 

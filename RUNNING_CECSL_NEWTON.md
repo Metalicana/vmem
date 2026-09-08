@@ -1,9 +1,15 @@
 # VMem Budgeted Memory Runs
 
+For the interrupted Oxford pilot, follow the
+[2026-09-08 restart instructions](VMEM_RESTART.md): incremental frames,
+checkpoints, persistent logs and a new experiment lock. New recovery code has
+not been executed or tested; the earlier 38-test result does not cover it.
+
 Current transfer/scaling work uses CECSL only. Follow the
 [instrumented CECSL runbook](VMEM_CECSL_EXPERIMENTS.md) for source locks, matched
-pilots and validation. The Mac is code-only; new instrumentation has not been
-executed. General inference and legacy Newton examples below remain available,
+pilots and validation. The Mac is code-only; the user reported 38 CPU tests
+passing on CECSL on 2026-09-07. Real GPU profiling/generation remain pending.
+General inference and legacy Newton examples below remain available,
 but are not the current locked experiment protocol.
 
 VMem now supports the same fixed-frame-budget policy family used in the MemCam

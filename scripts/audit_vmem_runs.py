@@ -60,7 +60,7 @@ def freeze(args):
             "units": "Navigator units; not reconstructed coverage or meters",
         }
     first = _generation_provenance(Path(rows[0]["image"]), args.config)
-    lock = {"schema": "vmem_experiment_lock_v1", "manifest": str(args.manifest),
+    lock = {"schema": "vmem_experiment_lock_v2", "manifest": str(args.manifest),
             "manifest_sha256": file_hash(args.manifest), "config": str(args.config),
             "config_sha256": first["config_sha256"], "source_sha256": first["source_sha256"],
             "git_commit": first["git_commit"], "rows": rows,
@@ -119,7 +119,10 @@ def validate_resources(steps, settings):
     for index, step in enumerate(steps):
         if step["step"] != index or step["frame_count"] != 1 + (index + 1) * settings["frames_per_action"]:
             raise ValueError("Resource step/frame indices differ from protocol")
-        if step["warmup"] != (index < settings["profile_warmup_steps"]):
+        session_start = step.get("session_start_step", 0)
+        if not isinstance(session_start, int) or not 0 <= session_start <= index:
+            raise ValueError("Invalid profiling session boundary")
+        if step["warmup"] != (index < session_start + settings["profile_warmup_steps"]):
             raise ValueError("Inconsistent warm-up classification")
         if step["policy"] != settings["memory_policy"] or step["budget"] != settings["memory_budget"] or step["scope"] != settings["memory_scope"]:
             raise ValueError("Resource trace policy, budget or scope mismatch")
@@ -228,10 +231,11 @@ def inspect_attempt(path, row, lock_path, lock):
         if spec["provenance"].get("experiment_lock_sha256") != file_hash(lock_path):
             raise ValueError("Run was not executed under this experiment lock")
         item["provenance_verified"] = True
+        item["resumed"] = bool(spec.get("recovery", {}).get("resume"))
         status_path = path / "run_status.json"
         status = json.loads(status_path.read_text()) if status_path.exists() else {}
         if status.get("status") != "complete":
-            item.update(status="failed" if status.get("status") == "failed" else "unfinished", details=status)
+            item.update(status=status["status"] if status.get("status") in {"failed", "paused"} else "unfinished", details=status)
             return item
         metadata = json.loads((path / "metadata.json").read_text())
         settings = expected_settings(row)
@@ -240,6 +244,8 @@ def inspect_attempt(path, row, lock_path, lock):
                 raise ValueError(f"Metadata mismatch: {key}")
         if metadata["provenance"] != spec["provenance"]:
             raise ValueError("Metadata and run spec provenance differ")
+        if metadata.get("recovery") != spec.get("recovery"):
+            raise ValueError("Metadata and run spec recovery lineage differ")
         if set(spec["provenance"].get("checkpoint_sha256", {})) != {"vmem", "cut3r"}:
             raise ValueError("Missing VMem/CUT3R checkpoint hashes")
         if file_hash(lock["config"]) != lock["config_sha256"]:
@@ -293,6 +299,7 @@ def inventory(args):
         if valid and (selected[0]["checkpoints"] != selected[1]["checkpoints"] or selected[0]["environment"] != selected[1]["environment"]):
             valid, reason = False, "checkpoint or runtime environment mismatch"
         pairs.append({"case_id": rows[0].get("_case_id", rows[0]["run_id"]), "validated_pair": bool(valid),
+                      "uninterrupted_resource_pair": bool(valid and not any(arm.get("resumed") for arm in selected)),
                       "reason": reason, "arms": selected})
     write_json(args.output, {"schema": "vmem_inventory_v1", "lock": str(args.lock),
                              "attempts": attempts, "pairs": pairs, "quality_results": "pending user evaluation"})

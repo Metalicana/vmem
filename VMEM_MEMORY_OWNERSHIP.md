@@ -1,8 +1,20 @@
 # VMem Memory Ownership and Measurement Audit
 
-Date: 2026-09-06. Static code audit of our VMem fork. The new instrumentation
-has not been executed or validated. All tests and experiments are to be run by
-the user on CECSL, not on the coding Mac.
+2026-09-08 update: new runs now have per-action PNGs and rolling recovery
+checkpoints; see [recovery ownership and restart notes](VMEM_RESTART.md).
+This does not release histories or change B's meaning. `runner_frame_hashes`
+adds one SHA-256 string per durable frame. Checkpoint serialization/copying can
+increase host peaks and disk use, and its cost is logged separately in
+`recovery_trace.jsonl`. Restoring NumPy/PIL objects may change backing-storage
+layout, while CUDA allocator peaks reset per process; default resource plots
+exclude resumed pairs. These additions are untested, and the CPU pass below
+predates them. No local tests/generation were run.
+
+Audit date: 2026-09-06; validation update: 2026-09-07. Static code audit of our
+VMem fork. The user reported all 38 CPU tests passing on CECSL, including the
+new resource-accounting tests. Real GPU instrumentation and generation remain
+unvalidated. All tests and experiments are run by the user on CECSL, not on the
+coding Mac.
 
 ## What Is Bounded
 
@@ -121,8 +133,10 @@ file I/O and boundary waits can lie outside these intervals. Initialization and
 model loading are separate from generation stages. The first two generation
 steps are marked warm-up by convention, not evidence that all startup effects
 have ended. Metadata records `model_load_seconds` and `initialization_seconds`
-separately; initialization includes initial image/latent setup and first scene
-reconstruction, but not the runner's input-image preprocessing.
+separately; initialization includes initial image/latent/embedding setup, but
+not the runner's input-image preprocessing. Scene reconstruction begins with
+the first generated action. A resumed process restores state instead of calling
+Navigator initialization; its recovery loading/copying is part of total wall time.
 The first step uses one reference plus padded target slots; subsequent
 steps use the normal four reference/four target layout.
 
@@ -134,7 +148,10 @@ Pre/post snapshots are update-boundary samples, not per-component peak sampling.
 Navigator and runner logs are updated after the pipeline returns, so their
 snapshot item counts lag the current action by one; pipeline frame counts do not.
 JSONL appends preserve earlier completed steps on ordinary failure. SIGKILL or a
-node loss may leave an incomplete final line or an unfinished run status.
+node loss may leave an incomplete final line or an unfinished run status. For
+new recovery-enabled runs, completed PNGs and the last committed state can
+survive too. New process segments have separate warm-up labels; old code's
+first-two-global-steps convention remains in its original traces.
 
 ## Supported Claims and Pending Evidence
 

@@ -154,18 +154,22 @@ def process_memory(torch_module=None, device="cpu"):
 
 
 class ResourceProfiler:
-    def __init__(self, path, *, device="cpu", torch_module=None, fps=13.0, warmup_steps=2):
+    def __init__(self, path, *, device="cpu", torch_module=None, fps=13.0, warmup_steps=2,
+                 session_start_step=0, session_id=None):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.device = device
         self.torch = torch_module
         self.fps = fps
         self.warmup_steps = warmup_steps
+        self.session_start_step = session_start_step
+        self.session_id = session_id
         self.active = False
         self.extra_components = lambda: {}
         self.current_phase = None
         self.failed_phase = None
-        self.write({"event": "schema", "schema": SCHEMA_VERSION,
+        self.write({"event": "session" if self.path.exists() else "schema", "schema": SCHEMA_VERSION,
+                    "session_start_step": session_start_step, "session_id": session_id,
                     "timing": "perf_counter wall time with selected CUDA device synchronized at each stage boundary",
                     "warmup_steps": warmup_steps,
                     "bytes": "unique backing storage + sys.getsizeof + estimated logical PIL pixels; excludes native allocator overhead",
@@ -222,7 +226,8 @@ class ResourceProfiler:
         after_update = self.capture(pipeline)
         self.write({
             "event": "step", "schema": SCHEMA_VERSION, "step": self.step,
-            "warmup": self.step < self.warmup_steps,
+            "warmup": self.step < self.session_start_step + self.warmup_steps,
+            "session_start_step": self.session_start_step, "session_id": self.session_id,
             "frame_count": len(pipeline.pil_frames), "video_seconds": len(pipeline.pil_frames) / self.fps,
             "policy": pipeline.memory_policy, "budget": pipeline.memory_budget,
             "scope": pipeline.memory_scope, "phase_seconds": self.times,

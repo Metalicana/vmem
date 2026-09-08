@@ -273,6 +273,7 @@ def _generation_provenance(image_path: Path, config_path: Path) -> dict:
         "scripts/run_vmem_demo_actions.py", "navigation.py", "modeling/pipeline.py",
         "modeling/memory_policies.py", "modeling/sampling.py", "utils/util.py",
         "modeling/resource_audit.py", "scripts/vmem_protocol.py",
+        "scripts/vmem_recovery.py",
     )
     try:
         commit = subprocess.check_output(
@@ -306,6 +307,7 @@ def _checkpoint_hashes(pipeline):
 
 
 def _install_failure_log(run_dir, runtime):
+    from scripts.vmem_recovery import atomic_json
     previous_hook = sys.excepthook
 
     def on_exception(error_type, error, traceback):
@@ -318,12 +320,13 @@ def _install_failure_log(run_dir, runtime):
                 profiler = getattr(pipeline, "resource_profiler", None)
                 if profiler is not None:
                     profiler.failure(error)
-            (run_dir / "run_status.json").write_text(json.dumps(status, indent=2))
+            status["pid"] = os.getpid()
+            atomic_json(run_dir / "run_status.json", status)
         finally:
             previous_hook(error_type, error, traceback)
 
     sys.excepthook = on_exception
-    (run_dir / "run_status.json").write_text(json.dumps({"status": "running"}))
+    atomic_json(run_dir / "run_status.json", {"status": "running", "pid": os.getpid()})
 
 
 def main() -> None:
@@ -380,11 +383,17 @@ def main() -> None:
     parser.add_argument("--inference-steps", type=int)
     parser.add_argument("--surfel-niter", type=int)
     parser.add_argument("--surfel-reconstruction-window", type=int)
-    parser.add_argument("--save-frames", action="store_true")
+    parser.add_argument("--save-frames", action="store_true",
+                        help="Compatibility flag: this runner now always saves incremental PNG frames.")
     parser.add_argument("--visualize-intermediates", action="store_true")
     parser.add_argument("--resource-trace", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--profile-warmup-steps", type=int, default=2)
     parser.add_argument("--experiment-lock", type=Path)
+    parser.add_argument("--checkpoint-every", type=int, default=5,
+                        help="Commit recovery state every N actions; 0 disables state checkpoints, not PNG saving.")
+    parser.add_argument("--resume-from", type=Path, help="Trusted local run directory containing recovery/latest.pt.")
+    parser.add_argument("--stop-after-actions", type=int,
+                        help="Pause this process after N additional actions with a committed checkpoint.")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     args.trajectory = _canonical_trajectory(args.trajectory)
@@ -403,6 +412,14 @@ def main() -> None:
         raise ValueError("--profile-warmup-steps must be nonnegative")
     if args.frames_per_action <= 0:
         raise ValueError("--frames-per-action must be positive")
+    if args.checkpoint_every < 0:
+        raise ValueError("--checkpoint-every must be nonnegative")
+    if args.checkpoint_every and args.frames_per_action != 4:
+        raise ValueError("Recovery currently requires four-frame actions; use --checkpoint-every 0 otherwise")
+    if args.resume_from is not None and not (args.resume_from / "recovery" / "latest.pt").is_file():
+        raise ValueError("No recovery/latest.pt in --resume-from; old action logs cannot resume generation")
+    if args.stop_after_actions is not None and (args.stop_after_actions <= 0 or not args.checkpoint_every):
+        raise ValueError("--stop-after-actions requires a positive count and enabled checkpoints")
     if args.memory_policy in BUDGETED_MEMORY_POLICIES and (
         args.memory_budget is None or args.memory_budget <= 0
     ):
@@ -445,6 +462,10 @@ def main() -> None:
         provenance["experiment_lock_sha256"] = verify_lock(args.experiment_lock, vars(args), provenance)
 
     _load_runtime_dependencies()
+    from scripts.vmem_recovery import (
+        append_event, atomic_json, identity, load_checkpoint, restore_into_new_attempt,
+        restore_rng, save_checkpoint, save_new_frames,
+    )
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -506,35 +527,73 @@ def main() -> None:
     initial_pose = np.eye(4, dtype=np.float32)
     initial_K = np.array(get_default_intrinsics()[0])
     action_records = []
+    frame_hashes = []
+    resume_info = None
+    rng_to_restore = None
+    run_identity = identity(vars(args), provenance, torch)
+    if args.resume_from is not None:
+        runtime["phase"] = "recovery_load"
+        state, state_hash = load_checkpoint(args.resume_from, run_identity, torch, device)
+        completed_actions = state["completed_actions"]
+        action_records, frame_hashes, rng_to_restore = restore_into_new_attempt(
+            args.resume_from, run_dir, state, pipeline, navigator,
+        )
+        resume_info = {"parent_run": str(args.resume_from.resolve()), "checkpoint_sha256": state_hash,
+                       "completed_actions": completed_actions, "inherited_frames": len(frame_hashes)}
+        del state
+    start_action = len(action_records)
+    if start_action > args.num_actions:
+        raise ValueError("Recovery checkpoint exceeds the planned action count")
+    spec_path = run_dir / "run_spec.json"
+    spec = json.loads(spec_path.read_text())
+    spec["recovery"] = {"schema": "vmem_recovery_v1", "checkpoint_every": args.checkpoint_every,
+                        "resume": resume_info, "durable_frames": True}
+    atomic_json(spec_path, spec)
     if args.resource_trace:
         from modeling.resource_audit import ResourceProfiler
         pipeline.resource_profiler = ResourceProfiler(
             run_dir / "resource_trace.jsonl", device=device, torch_module=torch,
             fps=args.fps, warmup_steps=args.profile_warmup_steps,
+            session_start_step=start_action, session_id=run_dir.name,
         )
         pipeline.resource_profiler.extra_components = lambda: {
             "navigator_frames": navigator.frames, "navigator_poses": navigator.pose_history,
             "navigator_current_pose": navigator.current_pose, "navigator_current_K": navigator.current_K,
             "runner_action_records": action_records, "runner_planned_actions": actions,
             "runner_initial_image": initial_image,
+            "runner_frame_hashes": frame_hashes,
         }
     runtime["phase"] = "initialization"
     if device.type == "cuda":
         torch.cuda.synchronize(device)
     initialization_started = time.perf_counter()
-    navigator.initialize(initial_image, initial_pose, initial_K)
+    if args.resume_from is None:
+        navigator.initialize(initial_image, initial_pose, initial_K)
     if device.type == "cuda":
         torch.cuda.synchronize(device)
     initialization_seconds = time.perf_counter() - initialization_started
     if args.resource_trace:
         pipeline.resource_profiler.initial_snapshot(pipeline)
+    frame_save_seconds = save_new_frames(run_dir, pipeline.pil_frames, frame_hashes)
+    if rng_to_restore is not None:
+        restore_rng(rng_to_restore, torch, device)
+        del rng_to_restore
+    if args.checkpoint_every:
+        runtime["phase"] = "checkpoint"
+        append_event(run_dir, save_checkpoint(run_dir, pipeline, navigator, action_records, frame_hashes, run_identity, torch))
+    if resume_info is not None:
+        append_event(run_dir, {"event": "resume", **resume_info})
+    append_event(run_dir, {"event": "frame_save", "completed_actions": start_action,
+                           "frame_count": len(frame_hashes), "frame_save_seconds": frame_save_seconds})
 
     runtime["phase"] = "generation"
     autocast_context = (
         torch.autocast("cuda") if device.type == "cuda" else nullcontext()
     )
     with torch.no_grad(), autocast_context:
-        for action_index, action in enumerate(actions):
+        for action_index in range(start_action, len(actions)):
+            action = actions[action_index]
+            runtime["phase"] = "generation"
             print(
                 f"[{action_index + 1}/{len(actions)}] action={action} "
                 f"stored_frames={len(pipeline.pil_frames)}",
@@ -555,16 +614,30 @@ def main() -> None:
             )
             with (run_dir / "actions.partial.jsonl").open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(action_records[-1]) + "\n")
+            runtime["phase"] = "frame_save"
+            frame_save_seconds = save_new_frames(run_dir, pipeline.pil_frames, frame_hashes)
+            append_event(run_dir, {"event": "frame_save", "completed_actions": len(action_records),
+                                   "frame_count": len(frame_hashes), "frame_save_seconds": frame_save_seconds})
+            pause = (args.stop_after_actions is not None
+                     and len(action_records) - start_action >= args.stop_after_actions
+                     and len(action_records) < len(actions))
+            if args.checkpoint_every and (len(action_records) % args.checkpoint_every == 0 or pause
+                                          or len(action_records) == len(actions)):
+                runtime["phase"] = "checkpoint"
+                append_event(run_dir, save_checkpoint(run_dir, pipeline, navigator, action_records, frame_hashes, run_identity, torch))
+            atomic_json(run_dir / "run_status.json", {
+                "status": "paused" if pause else "running", "pid": os.getpid(),
+                "completed_actions": len(action_records), "durable_frames": len(frame_hashes),
+                "updated_at": datetime.now().isoformat(),
+            })
+            if pause:
+                print(json.dumps({"run_dir": str(run_dir), "status": "paused",
+                                  "completed_actions": len(action_records)}, indent=2), flush=True)
+                return
 
     runtime["phase"] = "export"
     generated_video_path = run_dir / "generated.mp4"
     _save_pil_video(pipeline.pil_frames, generated_video_path, fps=args.fps)
-
-    if args.save_frames:
-        frame_dir = run_dir / "generated_frames"
-        frame_dir.mkdir(parents=True, exist_ok=True)
-        for frame_idx, frame in enumerate(pipeline.pil_frames):
-            frame.save(frame_dir / f"{frame_idx:04d}.png")
 
     actions_path = run_dir / "actions.json"
     with actions_path.open("w", encoding="utf-8") as handle:
@@ -582,6 +655,8 @@ def main() -> None:
         "provenance": provenance,
         "model_load_seconds": model_load_seconds,
         "initialization_seconds": initialization_seconds,
+        "recovery": spec["recovery"],
+        "wall_time_scope": "current process only, including load, recovery, checkpoint I/O and export",
         "resource_trace": run_dir / "resource_trace.jsonl" if args.resource_trace else None,
         "profile_warmup_steps": args.profile_warmup_steps,
         "generation_config": run_dir / "generation_config.yaml",
@@ -620,7 +695,7 @@ def main() -> None:
     metadata_path = run_dir / "metadata.json"
     with metadata_path.open("w", encoding="utf-8") as handle:
         json.dump(_json_safe(metadata), handle, indent=2)
-    (run_dir / "run_status.json").write_text(json.dumps({"status": "complete"}))
+    atomic_json(run_dir / "run_status.json", {"status": "complete", "pid": os.getpid()})
 
     print(json.dumps(_json_safe({
         "run_dir": run_dir,

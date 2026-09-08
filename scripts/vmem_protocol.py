@@ -61,6 +61,7 @@ def expected_settings(row):
         "inference_steps": row.get("inference_steps"), "surfel_niter": row.get("surfel_niter"),
         "surfel_reconstruction_window": row.get("surfel_reconstruction_window"),
         "resource_trace": True, "profile_warmup_steps": 2,
+        "checkpoint_every": row.get("checkpoint_every", 5),
         "visualize_intermediates": row.get("visualize_intermediates", False),
     }
     num_actions = row.get("num_actions")
@@ -85,6 +86,8 @@ def verify_lock(lock_path, arguments, provenance):
     if provenance["image_sha256"] != lock["image_sha256"][expected["image"]]:
         raise ValueError("Experiment lock mismatch: input image")
     for key, value in expected_settings(expected).items():
+        if key == "checkpoint_every" and lock.get("schema") != "vmem_experiment_lock_v2":
+            continue
         actual = arguments.get(key)
         if isinstance(actual, Path):
             actual = str(actual)

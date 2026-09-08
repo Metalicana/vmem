@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import json
 import os
 from pathlib import Path
@@ -34,6 +35,7 @@ SUPPORTED_KEYS = {
     "surfel_reconstruction_window": "--surfel-reconstruction-window",
     "save_frames": "--save-frames",
     "visualize_intermediates": "--visualize-intermediates",
+    "checkpoint_every": "--checkpoint-every",
 }
 
 
@@ -72,6 +74,7 @@ def _command_for_row(
     device: str,
     dry_run: bool,
     experiment_lock: Path | None = None,
+    resume_from: Path | None = None,
 ) -> list[str]:
     unknown_keys = sorted(
         key for key in row if key not in SUPPORTED_KEYS and not key.startswith("_")
@@ -97,10 +100,19 @@ def _command_for_row(
         command.append("--dry-run")
     if experiment_lock is not None:
         command.extend(["--experiment-lock", str(experiment_lock)])
+    if resume_from is not None:
+        command.extend(["--resume-from", str(resume_from)])
     return command
 
 
 def _selected_indices(args, rows: list[dict[str, Any]]) -> list[int]:
+    if getattr(args, "job_indices", None) is not None:
+        if args.all or args.job_index is not None:
+            raise ValueError("Use only one of --job-indices, --job-index or --all")
+        indices = args.job_indices
+        if len(set(indices)) != len(indices) or any(index < 0 or index >= len(rows) for index in indices):
+            raise ValueError("Job indices must be unique and within the manifest")
+        return indices
     if args.all:
         return list(range(len(rows)))
     job_index = args.job_index
@@ -114,10 +126,35 @@ def _selected_indices(args, rows: list[dict[str, Any]]) -> list[int]:
     return [job_index]
 
 
+def run_logged(command, *, log_dir, index):
+    log_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"job{index:03d}_{datetime.now():%Y%m%d_%H%M%S_%f}_{os.getpid()}"
+    log_path = log_dir / (stem + ".log")
+    status_path = log_dir / (stem + ".json")
+    environment = dict(os.environ, PYTHONUNBUFFERED="1")
+    record = {"command": command, "job_index": index, "log": str(log_path),
+              "started_at": datetime.now().isoformat(), "cuda_visible_devices": environment.get("CUDA_VISIBLE_DEVICES")}
+    with log_path.open("x", encoding="utf-8") as log:
+        process = subprocess.Popen(command, cwd=REPO_ROOT, env=environment,
+                                   stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+        record.update(status="running", pid=process.pid)
+        status_path.write_text(json.dumps(record, indent=2))
+        print(f"VMem PID {process.pid}; follow progress with: tail -f {log_path}", flush=True)
+        try:
+            returncode = process.wait()
+        finally:
+            record.update(returncode=process.poll(), finished_at=datetime.now().isoformat(),
+                          status="exited" if process.poll() is not None else "controller_interrupted")
+            status_path.write_text(json.dumps(record, indent=2))
+    if returncode:
+        raise subprocess.CalledProcessError(returncode, command)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("manifest", type=Path)
     parser.add_argument("--job-index", type=int)
+    parser.add_argument("--job-indices", type=int, nargs="+", help="Run only these rows sequentially.")
     parser.add_argument(
         "--slurm-array-task-id",
         default=os.environ.get("SLURM_ARRAY_TASK_ID"),
@@ -129,10 +166,14 @@ def main() -> None:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--experiment-lock", type=Path)
+    parser.add_argument("--resume-from", type=Path, help="Resume one selected row into a new run directory.")
+    parser.add_argument("--log-dir", type=Path, help="Persistent child stdout/stderr logs; defaults under output-root.")
     args = parser.parse_args()
 
     rows = _load_manifest(args.manifest)
     indices = _selected_indices(args, rows)
+    if args.resume_from is not None and len(indices) != 1:
+        raise ValueError("--resume-from requires exactly one selected manifest row")
     for index in indices:
         row = rows[index]
         command = _command_for_row(
@@ -142,6 +183,7 @@ def main() -> None:
             device=args.device,
             dry_run=args.dry_run,
             experiment_lock=args.experiment_lock,
+            resume_from=args.resume_from,
         )
         print(
             json.dumps(
@@ -156,7 +198,10 @@ def main() -> None:
             ),
             flush=True,
         )
-        subprocess.run(command, cwd=REPO_ROOT, check=True)
+        if args.dry_run:
+            subprocess.run(command, cwd=REPO_ROOT, check=True)
+        else:
+            run_logged(command, log_dir=args.log_dir or args.output_root / "launcher_logs", index=index)
 
 
 if __name__ == "__main__":

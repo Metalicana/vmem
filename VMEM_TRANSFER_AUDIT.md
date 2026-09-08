@@ -1,13 +1,37 @@
 # VMem External Transfer: Audit and MemCam Handoff
 
-Date: 2026-09-06. Repository: `/Users/metalicana/projects_summer_2026/vmem`.
-Audited base HEAD: `8bc405e`, plus the uncommitted generation/experiment changes
+## 2026-09-08 Recovery Update
+
+The user-reported Oxford unbounded attempt stopped after action index 189
+(190 completed actions, 761 frames). No VMem process or CUDA compute job remained;
+`running` was stale. Kernel-log access was denied, so OOM is not established.
+The original runner saved no incremental image/state checkpoint and cannot
+resume that attempt. Keep the old output directory and lock as failure evidence.
+
+Recovery support is now implemented but **not yet tested on CECSL**: per-action
+atomic PNGs, rolling state/RNG checkpoints every five actions, new-directory
+resume, process-session labelling and persistent launcher logs. See
+[restart and validation instructions](VMEM_RESTART.md). The 38-test CPU pass
+below predates this change. No tests or generation were run on the Mac.
+
+The unchanged 15-case manifest must be executed under a **new source/config
+lock and output root** after checks. GeoCov scoring and inference settings are
+unchanged. Recovery is not an OOM fix or a physical-memory bound; it adds I/O,
+host-memory overhead and disk use. Resumed arms are labelled and excluded from
+default uninterrupted resource plots. The audit below describes the original
+transfer design; its save-at-end limitation is superseded only for new runs.
+
+Audit date: 2026-09-06; validation update: 2026-09-07.
+Repository: `/Users/metalicana/projects_summer_2026/vmem`.
+Audited base HEAD: `8bc405e`, plus the subsequent generation/experiment changes
 described below. No new GPU generation or VBench evaluation was run here.
 
 Current execution boundary: the Mac is code-only. The user runs checks and all
-experiments on CECSL after pushing/pulling the code. The new resource profiler,
-lock validator, inventory and plotter are **implemented but untested**. Historical
-test results below do not validate this instrumentation update.
+experiments on CECSL after pushing/pulling the code. On 2026-09-07 the user
+reported **38 CPU tests passing in 1.732 seconds** on CECSL, including the new
+resource/protocol tests. Real CUDA profiling, model generation, full run
+inventory validation and plotting remain pending. The pasted test output does
+not identify the tested commit or source hashes.
 
 ## Decision
 
@@ -155,8 +179,9 @@ for exact boundaries, observer overhead, alias attribution and exclusions.
 
 `actions.partial.jsonl` and resource JSONL are appended during generation.
 `run_status.json` marks success or an uncaught failure; abrupt termination can
-leave an unfinished status. These artifacts preserve earlier completed steps,
-but not a recoverable video checkpoint. The full video is still exported at end.
+leave an unfinished status. These JSONL artifacts alone preserve earlier completed
+steps, but cannot recover a video. The recovery update above additionally saves
+PNGs and state checkpoints for new runs. The full MP4 is still exported at the end.
 
 Navigator previously deleted the repository-wide `visualization` directory on
 initialization. It now creates its pipeline's configured directory without
@@ -223,8 +248,10 @@ settings as transfer_v1. Fixed traversals repeat 8 forward/8 backward actions;
 expanding excursions use 8/8, 16/16, 24/24, etc. Duration prefixes are fixed,
 not selected from quality results. The freeze tool records analytic endpoint
 poses/returns; the inventory checks executed poses against them. A path plotter
-is available for pre-generation inspection. No path checks have been executed
-for this new code yet.
+is available for pre-generation inspection. The user-reported CPU tests include
+path closure/extent and agreement with Navigator's actual movement methods with
+generation stubbed out. The freeze command and generated paths still need the
+pilot checks described in the runbook.
 
 Storage can be sampled at 10/20/30 seconds in the pilot and
 10/20/30/60/120/180 seconds in the long extension. Actual sample time is retained.
@@ -258,9 +285,12 @@ exact-index GT, validated CUT3R evaluation, or paired quality result is availabl
 - Historical validation before the resource update: 26 CPU tests and all 30
   transfer manifest dry-run rows passed; the Slurm wrapper passed shell syntax.
   This does not validate the new instrumentation, locks, scaling or inventory.
-- New tests have been added but not run, respecting the code-only Mac boundary.
-  Model loading, synchronized measurements, CUDA peaks and generation under the
-  new lock require user-run CECSL validation.
+- On 2026-09-07 the user supplied CECSL output for
+  `CUDA_VISIBLE_DEVICES="" python -m unittest discover -s tests -v`:
+  38 tests passed in 1.732 seconds, no failures or skips reported. This includes
+  backing-storage accounting, stubbed timing, paths, locks and budget checks.
+  Model loading, real CUDA synchronization/peaks and generation under the new
+  lock still require user-run pilot validation. No tests were rerun on the Mac.
 - Inventory and plotting tools are implemented, not measured results. Before
   publishing, collect validated pairs with decoded video integrity, matching
   provenance/checkpoints and traced bank limits. Preserve failed/unfinished
