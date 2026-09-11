@@ -1,9 +1,16 @@
 # VMem Budgeted Memory Runs
 
+For the current payload-eviction work, start with
+[resident-memory transfer v2](VMEM_RESIDENT_MEMORY.md). Its CECSL validation is
+pending; old passes and launches below do not validate the new storage path.
+
 For the interrupted Oxford pilot, follow the
 [2026-09-08 restart instructions](VMEM_RESTART.md): incremental frames,
-checkpoints, persistent logs and a new experiment lock. New recovery code has
-not been executed or tested; the earlier 38-test result does not cover it.
+checkpoints, persistent logs and a new experiment lock. Updated unit tests passed
+according to the user; resumed-smoke metadata/status shows 13 frames, two
+restored actions and `complete`. The long retry can proceed under a new lock;
+numerical parity and full resource/video validation remain pending. The earlier
+38-test result predates recovery changes.
 
 Current transfer/scaling work uses CECSL only. Follow the
 [instrumented CECSL runbook](VMEM_CECSL_EXPERIMENTS.md) for source locks, matched

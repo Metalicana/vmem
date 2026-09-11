@@ -15,9 +15,10 @@ import time
 
 import numpy as np
 from PIL import Image
+from frame_storage import validate_resident_payloads
 
 
-SCHEMA = "vmem_recovery_v1"
+SCHEMA = "vmem_recovery_v2"
 STATE_FIELDS = (
     "latents", "encoder_embeddings", "poses", "c2ws", "Ks", "focal_lengths",
     "surfel_depths", "surfel_Ks", "surfels", "surfel_to_timestep",
@@ -25,6 +26,7 @@ STATE_FIELDS = (
     "surfel_reconstruction_window", "global_step", "initial_threshold",
     "memory_descriptor_sources", "_active_target_frame_indices",
     "retrieval_trace", "memory_events", "_dino_feature_cache",
+    "frame_storage", "durable_frame_count", "_pending_payload_evictions",
 )
 TRACE_FILES = ("resource_trace.jsonl", "actions.partial.jsonl", "recovery_trace.jsonl")
 IDENTITY_ARGS = (
@@ -32,6 +34,7 @@ IDENTITY_ARGS = (
     "frames_per_action", "seed", "memory_policy", "memory_budget", "memory_scope",
     "inference_steps", "surfel_niter", "surfel_reconstruction_window",
     "visualize_intermediates", "resource_trace", "profile_warmup_steps", "checkpoint_every",
+    "frame_storage",
 )
 
 
@@ -85,16 +88,33 @@ def save_new_frames(run_dir, frames, hashes):
         path = Path(run_dir) / "generated_frames" / f"{index:04d}.png"
         if path.exists():
             raise FileExistsError(f"Refusing to overwrite a durable frame: {path}")
+        if frames[index] is None:
+            raise ValueError(f"Frame {index} was evicted before durable output")
         atomic_write(path, lambda handle: frames[index].save(handle, format="PNG"))
         hashes.append(digest_file(path))
     return time.perf_counter() - started
+
+
+def iter_saved_frames(run_dir, frame_hashes):
+    """Read one durable frame at a time; never repopulate the memory bank."""
+    for index, expected_hash in enumerate(frame_hashes):
+        path = Path(run_dir) / "generated_frames" / f"{index:04d}.png"
+        if digest_file(path) != expected_hash:
+            raise ValueError(f"Output frame hash mismatch: {path}")
+        with Image.open(path) as image:
+            yield image
 
 
 def save_checkpoint(run_dir, pipeline, navigator, action_records, frame_hashes, run_identity, torch_module):
     started = time.perf_counter()
     if len(frame_hashes) != len(pipeline.pil_frames):
         raise ValueError("Save every frame before committing its checkpoint")
-    frame_ids = {id(frame): index for index, frame in enumerate(pipeline.pil_frames)}
+    resident = getattr(pipeline, "frame_storage", "legacy") == "resident"
+    if resident:
+        validate_resident_payloads(pipeline)
+        if navigator.frames:
+            raise ValueError("Navigator retained output images in resident mode")
+    frame_ids = {id(frame): index for index, frame in enumerate(pipeline.pil_frames) if frame is not None}
     navigator_ids = [frame_ids[id(frame)] for frame in navigator.frames]
     device = pipeline.device
     if str(device).startswith("cuda"):
@@ -102,6 +122,7 @@ def save_checkpoint(run_dir, pipeline, navigator, action_records, frame_hashes, 
     state = {
         "schema": SCHEMA, "identity": run_identity,
         "completed_actions": len(action_records), "frame_count": len(frame_hashes),
+        "resident_frame_indices": [index for index, frame in enumerate(pipeline.pil_frames) if frame is not None],
         "pipeline": {name: getattr(pipeline, name) for name in STATE_FIELDS if hasattr(pipeline, name)},
         "navigator": {"current_pose": navigator.current_pose, "current_K": navigator.current_K,
                       "pose_history": navigator.pose_history, "frame_indices": navigator_ids},
@@ -142,6 +163,10 @@ def load_checkpoint(source_dir, run_identity, torch_module, device):
         state = torch_module.load(handle, map_location=map_storage, weights_only=False)
     if state.get("schema") != SCHEMA or state.get("identity") != run_identity:
         raise ValueError("Recovery source/config/input/settings/model/runtime identity mismatch")
+    for key in ("frame_storage", "memory_policy", "memory_budget", "memory_scope"):
+        fallback = "legacy" if key == "frame_storage" else None
+        if state["pipeline"].get(key, fallback) != run_identity["arguments"].get(key, fallback):
+            raise ValueError(f"Recovery pipeline differs from its declared {key}")
     cuda_state = state["rng"]["torch_cuda"]
     if (cuda_state is not None) != str(device).startswith("cuda"):
         raise ValueError("Recovery cannot switch between CPU and CUDA execution")
@@ -153,6 +178,17 @@ def load_checkpoint(source_dir, run_identity, torch_module, device):
         raise ValueError("Recovery supports one four-frame generation step per action")
     if len(state["frame_sha256"]) != frame_count:
         raise ValueError("Incomplete recovery frame hashes")
+    resident_ids = state["resident_frame_indices"]
+    if (len(resident_ids) != len(set(resident_ids))
+            or any(not isinstance(index, int) or not 0 <= index < frame_count for index in resident_ids)):
+        raise ValueError("Invalid resident frame IDs in checkpoint")
+    if state["pipeline"].get("frame_storage", "legacy") == "resident":
+        bank = state["pipeline"]["memory_buffer"]
+        allowed = list(range(frame_count)) if bank is None else bank.candidates()
+        if sorted(resident_ids) != sorted(allowed) or state["navigator"]["frame_indices"]:
+            raise ValueError("Recovery would restore payloads outside the resident bank")
+    elif resident_ids != list(range(frame_count)):
+        raise ValueError("Legacy recovery requires the complete image history")
     return state, sha.hexdigest()
 
 
@@ -177,7 +213,8 @@ def restore_into_new_attempt(source_dir, run_dir, state, pipeline, navigator):
         raise ValueError("Recovery must create a new attempt, preserving the original")
     frame_dir = run_dir / "generated_frames"
     frame_dir.mkdir(parents=True, exist_ok=True)
-    frames = []
+    frames = [None] * state["frame_count"]
+    resident_ids = set(state["resident_frame_indices"])
     for index, expected_hash in enumerate(state["frame_sha256"]):
         source = source_dir / "generated_frames" / f"{index:04d}.png"
         if digest_file(source) != expected_hash:
@@ -188,8 +225,11 @@ def restore_into_new_attempt(source_dir, run_dir, state, pipeline, navigator):
             shutil.copyfileobj(src, dst)
             dst.flush()
             os.fsync(dst.fileno())
-        with Image.open(target) as image:
-            frames.append(image.copy())
+        if digest_file(target) != expected_hash:
+            raise ValueError(f"Copied recovery frame hash mismatch: {target}")
+        if index in resident_ids:
+            with Image.open(target) as image:
+                frames[index] = image.copy()
     directory = os.open(frame_dir, os.O_RDONLY)
     try:
         os.fsync(directory)
@@ -209,6 +249,8 @@ def restore_into_new_attempt(source_dir, run_dir, state, pipeline, navigator):
     navigator.current_K = saved_navigator["current_K"]
     navigator.pose_history = saved_navigator["pose_history"]
     navigator.frames = [frames[index] for index in saved_navigator["frame_indices"]]
+    navigator.retain_frame_history = getattr(pipeline, "frame_storage", "legacy") != "resident"
+    validate_resident_payloads(pipeline)
     if state["has_dino_extractor"]:
         pipeline._dino_extractor_instance()
     return state.pop("action_records"), state.pop("frame_sha256"), state.pop("rng")

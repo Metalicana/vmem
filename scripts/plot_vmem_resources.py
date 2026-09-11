@@ -86,7 +86,13 @@ def plot_resources(inventory, output, include_incomplete, checkpoints):
                 "component_bytes_estimate": memory["estimated_component_bytes"],
                 "accounting_seconds": step["accounting_seconds"],
                 "reconstruction_input_count": len(step["reconstruction_input_indices"]),
+                "frame_storage": memory.get("frame_payloads", {}).get("mode", "legacy"),
+                "after_update_boundary": step.get("after_update_boundary", "pipeline_policy_update"),
             }
+            if "frame_payloads" in memory:
+                payload = memory["frame_payloads"]
+                entry["frame_payload_logical_bytes"] = payload["total_logical_bytes"]
+                entry.update({"resident_" + name: count for name, count in payload["resident_counts"].items()})
             for key in ("process_rss_bytes", "cuda_allocated_bytes", "cuda_reserved_bytes", "cuda_peak_allocated_bytes", "cuda_peak_reserved_bytes"):
                 entry[key] = memory.get(key)
             entry.update({name + "_seconds": seconds for name, seconds in step["phase_seconds"].items()})
@@ -106,7 +112,10 @@ def plot_resources(inventory, output, include_incomplete, checkpoints):
     for case, curves in groups.items():
         memory_figure, axes = plt.subplots(1, 3, figsize=(13, 4))
         latency_figure, latency_axis = plt.subplots(figsize=(7, 4))
-        for attempt, steps in curves:
+        stage_figure, stage_axes = plt.subplots(1, 4, figsize=(16, 4))
+        payload_figure, payload_axes = plt.subplots(1, 2, figsize=(9, 4))
+        has_resident = False
+        for arm_index, (attempt, steps) in enumerate(curves):
             label = attempt["policy"] + (" (incomplete)" if attempt["status"] != "validated" else "")
             style = "-" if attempt["status"] == "validated" else "--"
             x = [step["video_seconds"] for step in steps]
@@ -115,16 +124,27 @@ def plot_resources(inventory, output, include_incomplete, checkpoints):
             payload = [sum(value["estimated_bytes"] for key, value in step["after_update"]["components"].items()
                            if not key.startswith("weights_")) / 2**20 for step in steps]
             axes[1].plot(x, payload, style, label=label)
-            for key, suffix in (("cuda_allocated_bytes", "allocated"), ("cuda_reserved_bytes", "reserved")):
+            for key, suffix in (("cuda_allocated_bytes", "allocated"), ("cuda_reserved_bytes", "reserved"),
+                                ("cuda_peak_allocated_bytes", "cumulative peak allocated")):
                 values = [step["after_update"].get(key) for step in steps]
                 axes[2].plot(x, [value / 2**20 if value is not None else float("nan") for value in values],
-                             "--" if suffix == "reserved" else style, label=label + " " + suffix)
+                             ":" if key == "cuda_peak_allocated_bytes" else "--" if suffix == "reserved" else style,
+                             color=f"C{arm_index}", label=label + " " + suffix)
             steady = [step for step in steps if not step["warmup"]]
             latency_axis.plot([step["video_seconds"] for step in steady],
                               [step["phase_seconds"]["retrieval"] * 1000 for step in steady], style, label=label)
             warmup = [step for step in steps if step["warmup"]]
             latency_axis.scatter([step["video_seconds"] for step in warmup],
                                  [step["phase_seconds"]["retrieval"] * 1000 for step in warmup], marker="x", label=label + " warm-up")
+            for axis, phase in zip(stage_axes, ("retrieval", "reconstruction", "generation", "memory_update")):
+                times = [step["phase_seconds"][phase] + (step["phase_seconds"].get("payload_eviction", 0)
+                         if phase == "memory_update" else 0) for step in steady]
+                axis.plot([step["video_seconds"] for step in steady], times, style, label=label)
+            if steps[-1]["after_update"].get("frame_payloads", {}).get("mode") == "resident":
+                has_resident = True
+                payloads = [step["after_update"]["frame_payloads"] for step in steps]
+                payload_axes[0].plot(x, [p["resident_counts"]["pil_frames"] for p in payloads], style, label=label)
+                payload_axes[1].plot(x, [p["total_logical_bytes"] / 2**20 for p in payloads], style, label=label)
         for axis, title in zip(axes, ("Process RSS (MiB)", "Tracked persistent estimate, excluding weights (MiB)", "PyTorch CUDA allocator (MiB)")):
             axis.set(xlabel="Video duration (s)", ylabel=title)
             axis.legend(fontsize=6)
@@ -137,6 +157,21 @@ def plot_resources(inventory, output, include_incomplete, checkpoints):
         latency_figure.tight_layout()
         latency_figure.savefig(output / f"{case}_retrieval_latency_vs_duration.png", dpi=180)
         plt.close(latency_figure)
+        for axis, title in zip(stage_axes, ("Retrieval", "Reconstruction", "Generation", "Controller + payload release")):
+            axis.set(xlabel="Video duration (s)", ylabel="Synchronized wall time (s/update)", title=title)
+            axis.legend(fontsize=6)
+        stage_figure.suptitle(case + "; warm-up excluded; output/checkpoint I/O separate")
+        stage_figure.tight_layout()
+        stage_figure.savefig(output / f"{case}_stage_times_vs_duration.png", dpi=180)
+        plt.close(stage_figure)
+        if has_resident:
+            for axis, title in zip(payload_axes, ("Resident RGB frames", "Owned frame payloads (MiB, RGB estimated)")):
+                axis.set(xlabel="Video duration (s)", ylabel=title)
+                axis.legend(fontsize=6)
+            payload_figure.suptitle(case + "; excludes weights, geometry and history metadata")
+            payload_figure.tight_layout()
+            payload_figure.savefig(output / f"{case}_resident_payloads_vs_duration.png", dpi=180)
+        plt.close(payload_figure)
     write_csv(output / "resource_steps.csv", flat)
     write_csv(output / "duration_checkpoints.csv", checkpoint_rows)
     (output / "availability.json").write_text(json.dumps({

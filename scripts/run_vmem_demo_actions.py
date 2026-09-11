@@ -15,7 +15,7 @@ import random
 import subprocess
 import sys
 import time
-from typing import Sequence
+from typing import Iterable, Sequence
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -115,7 +115,7 @@ def _json_safe(value):
     return value
 
 
-def _save_pil_video(frames: Sequence, path: Path, *, fps: float) -> None:
+def _save_pil_video(frames: Iterable, path: Path, *, fps: float) -> None:
     try:
         import imageio.v2 as imageio
     except ModuleNotFoundError as exc:
@@ -274,6 +274,7 @@ def _generation_provenance(image_path: Path, config_path: Path) -> dict:
         "modeling/memory_policies.py", "modeling/sampling.py", "utils/util.py",
         "modeling/resource_audit.py", "scripts/vmem_protocol.py",
         "scripts/vmem_recovery.py",
+        "frame_storage.py",
     )
     try:
         commit = subprocess.check_output(
@@ -383,6 +384,8 @@ def main() -> None:
     parser.add_argument("--inference-steps", type=int)
     parser.add_argument("--surfel-niter", type=int)
     parser.add_argument("--surfel-reconstruction-window", type=int)
+    parser.add_argument("--frame-storage", choices=("legacy", "resident"), default="legacy",
+                        help="resident releases evicted payloads after durable PNG output; legacy is eligibility-only.")
     parser.add_argument("--save-frames", action="store_true",
                         help="Compatibility flag: this runner now always saves incremental PNG frames.")
     parser.add_argument("--visualize-intermediates", action="store_true")
@@ -412,6 +415,11 @@ def main() -> None:
         raise ValueError("--profile-warmup-steps must be nonnegative")
     if args.frames_per_action <= 0:
         raise ValueError("--frames-per-action must be positive")
+    if args.frame_storage == "resident" and (
+        args.frames_per_action != 4 or args.memory_scope != "surfel_indexed_view_memory"
+        or args.visualize_intermediates or args.surfel_reconstruction_window is not None
+    ):
+        raise ValueError("Resident storage requires four-frame actions, indexed memory, no window and no full-history visualization")
     if args.checkpoint_every < 0:
         raise ValueError("--checkpoint-every must be nonnegative")
     if args.checkpoint_every and args.frames_per_action != 4:
@@ -450,12 +458,15 @@ def main() -> None:
                     "expected_seconds": expected_seconds,
                     "memory_policy": args.memory_policy,
                     "memory_budget": args.memory_budget,
+                    "frame_storage": args.frame_storage,
                 },
                 indent=2,
             )
         )
         return
 
+    if args.memory_policy in BUDGETED_MEMORY_POLICIES and args.frame_storage == "legacy":
+        print("WARNING: legacy mode bounds eligibility only. Use --frame-storage resident to release evicted payloads.", flush=True)
     from scripts.vmem_protocol import commanded_path, verify_lock
     provenance = _generation_provenance(args.image, args.config)
     if args.experiment_lock is not None:
@@ -465,7 +476,10 @@ def main() -> None:
     from scripts.vmem_recovery import (
         append_event, atomic_json, identity, load_checkpoint, restore_into_new_attempt,
         restore_rng, save_checkpoint, save_new_frames,
+        iter_saved_frames, SCHEMA as RECOVERY_SCHEMA,
     )
+    from frame_storage import release_evicted_payloads, validate_resident_payloads
+    from modeling.resource_audit import SCHEMA_VERSION as RESOURCE_SCHEMA
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -509,7 +523,7 @@ def main() -> None:
         json.dump(_json_safe({
             "arguments": vars(args), "actions": actions, "provenance": provenance,
             "torch_version": torch.__version__, "cuda_version": torch.version.cuda,
-            "resource_schema": "vmem_resources_v1" if args.resource_trace else None,
+            "resource_schema": RESOURCE_SCHEMA if args.resource_trace else None,
         }), handle, indent=2)
     pipeline.configure_memory_budget(
         policy=args.memory_policy,
@@ -517,11 +531,13 @@ def main() -> None:
         scope=args.memory_scope,
     )
     pipeline.configure_surfel_reconstruction(window=args.surfel_reconstruction_window)
+    pipeline.configure_frame_storage(args.frame_storage)
 
     navigator = Navigator(
         pipeline,
         step_size=args.step_size,
         num_interpolation_frames=args.frames_per_action,
+        retain_frame_history=args.frame_storage != "resident",
     )
     initial_image = _load_vmem_image(args.image, config=config, device=device)
     initial_pose = np.eye(4, dtype=np.float32)
@@ -546,7 +562,7 @@ def main() -> None:
         raise ValueError("Recovery checkpoint exceeds the planned action count")
     spec_path = run_dir / "run_spec.json"
     spec = json.loads(spec_path.read_text())
-    spec["recovery"] = {"schema": "vmem_recovery_v1", "checkpoint_every": args.checkpoint_every,
+    spec["recovery"] = {"schema": RECOVERY_SCHEMA, "checkpoint_every": args.checkpoint_every,
                         "resume": resume_info, "durable_frames": True}
     atomic_json(spec_path, spec)
     if args.resource_trace:
@@ -572,9 +588,12 @@ def main() -> None:
     if device.type == "cuda":
         torch.cuda.synchronize(device)
     initialization_seconds = time.perf_counter() - initialization_started
+    if args.frame_storage == "resident":
+        initial_image = None
+    frame_save_seconds = save_new_frames(run_dir, pipeline.pil_frames, frame_hashes)
+    release_evicted_payloads(pipeline, len(frame_hashes))
     if args.resource_trace:
         pipeline.resource_profiler.initial_snapshot(pipeline)
-    frame_save_seconds = save_new_frames(run_dir, pipeline.pil_frames, frame_hashes)
     if rng_to_restore is not None:
         restore_rng(rng_to_restore, torch, device)
         del rng_to_restore
@@ -596,12 +615,14 @@ def main() -> None:
             runtime["phase"] = "generation"
             print(
                 f"[{action_index + 1}/{len(actions)}] action={action} "
-                f"stored_frames={len(pipeline.pil_frames)}",
+                f"total_frames={len(pipeline.pil_frames)} eligible_frames={len(pipeline.get_allowed_memory_indices())} "
+                f"frame_storage={args.frame_storage}",
                 flush=True,
             )
             action_started_at = time.perf_counter()
             previous_frame_count = len(pipeline.pil_frames)
-            frames = _apply_action(navigator, action)
+            # Do not retain the returned batch across action boundaries.
+            _apply_action(navigator, action)
             action_records.append(
                 {
                     "action_index": action_index,
@@ -618,6 +639,16 @@ def main() -> None:
             frame_save_seconds = save_new_frames(run_dir, pipeline.pil_frames, frame_hashes)
             append_event(run_dir, {"event": "frame_save", "completed_actions": len(action_records),
                                    "frame_count": len(frame_hashes), "frame_save_seconds": frame_save_seconds})
+            if args.frame_storage == "resident":
+                runtime["phase"] = "payload_eviction"
+                if navigator.frames:
+                    raise RuntimeError("Navigator retained frame aliases in resident mode")
+                if args.resource_trace:
+                    pipeline.resource_profiler.begin_phase("payload_eviction")
+                release_evicted_payloads(pipeline, len(frame_hashes))
+                if args.resource_trace:
+                    pipeline.resource_profiler.end_phase("payload_eviction")
+                    pipeline.resource_profiler.finish_step(pipeline, storage_ready=True)
             pause = (args.stop_after_actions is not None
                      and len(action_records) - start_action >= args.stop_after_actions
                      and len(action_records) < len(actions))
@@ -637,7 +668,8 @@ def main() -> None:
 
     runtime["phase"] = "export"
     generated_video_path = run_dir / "generated.mp4"
-    _save_pil_video(pipeline.pil_frames, generated_video_path, fps=args.fps)
+    atomic_json(run_dir / "frame_manifest.json", {"schema": "vmem_output_frames_v1", "sha256": frame_hashes})
+    _save_pil_video(iter_saved_frames(run_dir, frame_hashes), generated_video_path, fps=args.fps)
 
     actions_path = run_dir / "actions.json"
     with actions_path.open("w", encoding="utf-8") as handle:
@@ -681,6 +713,8 @@ def main() -> None:
         "memory_policy": args.memory_policy,
         "memory_budget": args.memory_budget,
         "memory_scope": pipeline.memory_scope,
+        "frame_storage": args.frame_storage,
+        "frame_payloads": validate_resident_payloads(pipeline),
         "generated_video": generated_video_path,
         "actions": actions_path,
         "retrieval_trace": retrieval_trace_path,

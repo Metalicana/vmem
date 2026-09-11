@@ -1,9 +1,17 @@
 # VMem CECSL Transfer and Scaling Runbook
 
+2026-09-09: new work uses [resident-memory transfer v2](VMEM_RESIDENT_MEMORY.md).
+Run its CPU and 49-frame recovery gates before any new long rollout. Earlier
+test passes and instructions below apply to the legacy eligibility-only code.
+
 2026-09-08: the first unbounded pilot was interrupted near the end. Use the
 [recovery-enabled restart runbook](VMEM_RESTART.md) instead of repeating the
 old launch below. It requires new checks, a short pause/resume test, a new lock
-and a separate output root. The 38-test pass below predates recovery changes.
+and a separate output root. Updated unit tests passed according to the user;
+the resumed smoke run's supplied metadata/status shows 13 frames, two restored
+actions and `complete`. Proceed to the restart runbook's new-lock/launch steps.
+Numerical parity and full video/resource validation remain pending. The 38-test
+pass below predates recovery changes.
 
 Status (2026-09-07): user-reported CECSL CPU tests passed, 38 tests in 1.732s.
 Real CUDA profiling and the matched generation pilot remain pending. The Mac is for code only. The

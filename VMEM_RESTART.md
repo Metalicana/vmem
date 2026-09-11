@@ -1,5 +1,10 @@
 # Restarting the Oxford Pair
 
+2026-09-09: for the new physical frame-payload implementation, use
+[the resident-memory v2 runbook](VMEM_RESIDENT_MEMORY.md). The instructions below
+are historical recovery-v1 instructions. New source hashes/recovery-v2 cannot
+resume an old checkpoint or run under its old lock; preserve those artifacts.
+
 2026-09-08. The first unbounded attempt stopped after its last recorded action
 189 (190 completed actions, 761 frames). No matching process remained. Kernel
 logs were inaccessible, so the termination cause is unknown; this is not a
@@ -43,8 +48,16 @@ After pushing/pulling the changed code, in the `vmem` environment:
 CUDA_VISIBLE_DEVICES="" python -m unittest discover -s tests -v
 ```
 
-The earlier 38-test pass predates this recovery update. New tests have not been
-run on the Mac. Do not freeze or launch the long retry if the checks fail.
+The user subsequently reported "all test ok" after the recovery update on
+2026-09-08. Record this as a user-reported unit-test pass; no updated count,
+transcript or source hash was supplied. The user then supplied the resumed smoke
+run's metadata/status: `actual_frames: 13`,
+`recovery.resume.completed_actions: 2`, `status: complete` (PID 3628384).
+This satisfies the reported-completion gate for the pause/resume smoke run.
+It does not independently verify decoded MP4 frames or bitwise parity with an
+uninterrupted run. No tests were run on the Mac. The earlier 38-test pass
+predates this update. The unchanged tested code can now proceed to step 2;
+do not freeze or launch a long retry if checks on later code changes fail.
 
 Next, check a fresh `nvidia-smi` and disk/host memory (`df -h outputs`, `free -h`).
 GPU 0 was free in the last supplied snapshot, but that is not a reservation.
@@ -102,7 +115,7 @@ nohup env CUDA_VISIBLE_DEVICES="$GPU" python -u scripts/run_vmem_demo_manifest.p
   manifests/vmem_transfer_v1.jsonl --job-indices 0 1 \
   --experiment-lock outputs/locks/transfer_v1_recovery.json \
   --output-root outputs/vmem_transfer_v1_recovery \
-  > outputs/vmem_transfer_v1_recovery/controller.log 2>&1 < /dev/null &
+  >> outputs/vmem_transfer_v1_recovery/controller.log 2>&1 < /dev/null &
 ```
 
 `nohup` removes the dependency on keeping a tmux pane/terminal alive. It cannot

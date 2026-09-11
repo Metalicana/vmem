@@ -21,7 +21,8 @@ class Navigator:
     Provides methods to move forward and turn left/right, generating new camera poses
     and rendering frames using VMemPipeline.
     """
-    def __init__(self, pipeline: VMemPipeline, step_size: float = 0.1, num_interpolation_frames: int = 4):
+    def __init__(self, pipeline: VMemPipeline, step_size: float = 0.1, num_interpolation_frames: int = 4,
+                 retain_frame_history: bool = True):
         """
         Initialize the Navigator.
         
@@ -35,6 +36,7 @@ class Navigator:
         self.current_pose = None
         self.current_K = None
         self.frames = []
+        self.retain_frame_history = retain_frame_history
         self.num_interpolation_frames = num_interpolation_frames
         self.pose_history = []  # Store history of camera poses
         
@@ -56,7 +58,7 @@ class Navigator:
         
         # Use the pipeline's initialize method
         initial_frame = self.pipeline.initialize(image, initial_pose, initial_K)
-        self.frames = [initial_frame]
+        self.frames = [initial_frame] if getattr(self, "retain_frame_history", True) else []
         
         # Save the initial pose
         self.pose_history.append({
@@ -185,7 +187,8 @@ class Navigator:
         
         # Update the current pose to the final pose
         self.current_pose = interpolated_poses[-1]
-        self.frames.extend(new_frames)
+        if getattr(self, "retain_frame_history", True):
+            self.frames.extend(new_frames)
         
         # Save the final pose
         self.pose_history.append({
@@ -234,7 +237,8 @@ class Navigator:
         
         # Update the current pose to the final pose
         self.current_pose = interpolated_poses[-1]
-        self.frames.extend(new_frames)
+        if getattr(self, "retain_frame_history", True):
+            self.frames.extend(new_frames)
         
         # Save the final pose
         self.pose_history.append({
@@ -319,7 +323,8 @@ class Navigator:
         
         # Update the current pose to the final pose
         self.current_pose = interpolated_poses[-1]
-        self.frames.extend(new_frames)
+        if getattr(self, "retain_frame_history", True):
+            self.frames.extend(new_frames)
         
         # Save the final pose
         self.pose_history.append({
@@ -379,6 +384,8 @@ class Navigator:
         Returns:
             bool: True if undo was successful, False otherwise
         """
+        if not getattr(self, "retain_frame_history", True):
+            raise RuntimeError("Undo is unavailable in the disk-output batch runner")
         # Check if we have enough poses to undo
         if len(self.pose_history) <= 1:
             print("Cannot undo: at initial position")

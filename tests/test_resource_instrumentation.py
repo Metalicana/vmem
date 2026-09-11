@@ -16,7 +16,7 @@ from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
-from audit_vmem_runs import _expand_trajectory_actions, inspect_attempt, validate_actions, validate_resources, validate_retrieval
+from audit_vmem_runs import _expand_trajectory_actions, inspect_attempt, validate_actions, validate_resources, validate_retrieval, validate_payload_snapshot
 from vmem_protocol import commanded_path, expected_settings, scaling_actions, verify_lock
 
 SPEC = importlib.util.spec_from_file_location("resource_audit", ROOT / "modeling" / "resource_audit.py")
@@ -34,6 +34,42 @@ def pipeline_fixture():
 
 
 class ResourceAccountingTest(unittest.TestCase):
+    def test_resident_snapshot_waits_for_durable_output_and_release(self):
+        pipeline = pipeline_fixture()
+        pipeline.frame_storage = "resident"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "trace.jsonl"
+            profiler = RESOURCE.ResourceProfiler(path)
+            profiler.begin_step(pipeline)
+            profiler.finish_step(pipeline)
+            self.assertTrue(profiler.active)
+            self.assertFalse(any(json.loads(line).get("event") == "step" for line in path.read_text().splitlines()))
+            with self.assertRaises(RuntimeError):
+                profiler.begin_step(pipeline)
+            profiler.finish_step(pipeline, storage_ready=True)
+            self.assertFalse(profiler.active)
+            last = json.loads(path.read_text().splitlines()[-1])
+            self.assertEqual(last["after_update_boundary"], "durable_output_and_payload_release")
+
+    def test_payload_validator_rejects_retained_evictions_and_shared_storage(self):
+        from frame_storage import payload_summary
+        pipeline = pipeline_fixture()
+        pipeline.frame_storage = "resident"
+        pipeline.encoder_embeddings, pipeline.Ks = [np.ones(4)], [np.eye(3)]
+        pipeline.surfel_depths = [np.ones((4, 4))]
+        pipeline.durable_frame_count = 1
+        snapshot = RESOURCE.memory_snapshot(pipeline)
+        validate_payload_snapshot(snapshot, {0}, 1)
+        shared = copy.deepcopy(snapshot)
+        shared["frame_payloads"]["arrays_own_storage"] = False
+        with self.assertRaises(ValueError):
+            validate_payload_snapshot(shared, {0}, 1)
+        pipeline.pil_frames.append(Image.new("RGB", (8, 8)))
+        leaked = RESOURCE.memory_snapshot(pipeline)
+        with self.assertRaises(ValueError):
+            validate_payload_snapshot(leaked, {0}, 1)
+        self.assertEqual(payload_summary(pipeline)["resident_counts"]["pil_frames"], 2)
+
     def test_numpy_slices_count_retained_backing_storage_once(self):
         root = np.zeros((8, 64), dtype=np.float32)
         first, second = root[:1], root[1:2]
@@ -118,8 +154,10 @@ class ProtocolValidationTest(unittest.TestCase):
             navigator = navigator_type()
             navigator.current_pose, navigator.current_K = np.eye(4), np.eye(3)
             navigator.frames, navigator.pose_history = [], []
+            navigator.retain_frame_history = False
             navigator.step_size, navigator.num_interpolation_frames = 0.02, 4
-            navigator.pipeline = SimpleNamespace(generate_trajectory_frames=lambda *args, **kwargs: [])
+            navigator.pipeline = SimpleNamespace(generate_trajectory_frames=lambda *args, **kwargs:
+                                                [Image.new("RGB", (2, 2)) for _ in range(4)])
             for action, planned in zip(actions, commanded_path(actions, 0.02)):
                 if action in {"forward", "backward"}:
                     getattr(navigator, "move_" + action)()
@@ -127,6 +165,7 @@ class ProtocolValidationTest(unittest.TestCase):
                     method = navigator.turn_left if action.startswith("left") else navigator.turn_right
                     method(5 if action.endswith("5") else 10)
                 np.testing.assert_allclose(navigator.current_pose, planned["current_pose"], atol=1e-6)
+                self.assertEqual(navigator.frames, [])
 
     def test_scaling_prefixes_and_extent(self):
         for trajectory in ("fixed_region_v1", "expanding_excursions_v1"):

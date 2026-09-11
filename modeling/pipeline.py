@@ -39,6 +39,7 @@ from modeling.modules.autoencoder import AutoEncoder
 from modeling.sampling import DDPMDiscretization, DiscreteDenoiser, create_samplers
 from modeling.modules.conditioner import CLIPConditioner
 from modeling.resource_audit import profiled_phase
+from frame_storage import owned_frame_array
 from utils import (encode_vae_image, 
                    encode_image, 
                    visualize_depth, 
@@ -153,9 +154,15 @@ class VMemPipeline:
         self.retrieval_trace = []
         self.memory_events = []
         self.surfel_reconstruction_window = None
+        self.frame_storage = "legacy"
+        self._pending_payload_evictions = []
+        self.durable_frame_count = 0
        
 
     def reset(self):
+        self._pending_payload_evictions = []
+        self.durable_frame_count = 0
+        self._dino_feature_cache = {}
         self.latents = []
         self.encoder_embeddings = []
         self.poses = []
@@ -173,6 +180,19 @@ class VMemPipeline:
         if hasattr(self, "initial_threshold"):
             del self.initial_threshold
         self.global_step = 0
+
+    def configure_frame_storage(self, mode="legacy"):
+        if mode not in {"legacy", "resident"}:
+            raise ValueError(f"Unknown frame storage mode: {mode}")
+        if self.pil_frames:
+            raise ValueError("Configure frame storage before initialization")
+        if mode == "resident" and self.memory_scope != "surfel_indexed_view_memory":
+            raise ValueError("Resident storage requires surfel_indexed_view_memory")
+        if mode == "resident" and self.config.inference.visualize:
+            raise ValueError("Resident storage uses disk output, not full-history visualization")
+        if mode == "resident" and self.surfel_reconstruction_window is not None:
+            raise ValueError("Resident storage requires retained-plus-new reconstruction without a window")
+        self.frame_storage = mode
 
     def configure_surfel_reconstruction(self, window=None):
         if window is None:
@@ -196,6 +216,8 @@ class VMemPipeline:
         from the surfel-to-timestep index. In scope='view_context', the surfel
         geometry remains unbounded and only context-frame eligibility is limited.
         """
+        if getattr(self, "frame_storage", "legacy") == "resident" and self.pil_frames:
+            raise ValueError("Cannot reconfigure a resident bank after payloads may have been evicted")
         if policy not in SUPPORTED_MEMORY_POLICIES:
             raise ValueError(f"Unsupported memory policy: {policy}")
         if scope not in {"surfel_indexed_view_memory", "view_context"}:
@@ -257,10 +279,10 @@ class VMemPipeline:
         self.memory_descriptor_sources = {"clip_image_encoder": 0, "vae_latent_fallback": 0}
         for frame_idx in frame_indices:
             frame_idx = int(frame_idx)
-            if 0 <= frame_idx < len(self.encoder_embeddings):
+            if 0 <= frame_idx < len(self.encoder_embeddings) and self.encoder_embeddings[frame_idx] is not None:
                 feature = np.asarray(self.encoder_embeddings[frame_idx], dtype=np.float32)
                 self.memory_descriptor_sources["clip_image_encoder"] += 1
-            elif 0 <= frame_idx < len(self.latents):
+            elif 0 <= frame_idx < len(self.latents) and self.latents[frame_idx] is not None:
                 feature = np.asarray(self.latents[frame_idx], dtype=np.float32)
                 self.memory_descriptor_sources["vae_latent_fallback"] += 1
             else:
@@ -291,7 +313,7 @@ class VMemPipeline:
             extractor = self._dino_extractor_instance()
             encoded = extractor.encode_pil_images([self.pil_frames[idx] for idx in missing])
             for frame_idx, feature in zip(missing, encoded):
-                self._dino_feature_cache[frame_idx] = feature
+                self._dino_feature_cache[frame_idx] = owned_frame_array(feature, self.frame_storage)
         return {
             int(idx): self._dino_feature_cache[int(idx)]
             for idx in frame_indices
@@ -473,6 +495,8 @@ class VMemPipeline:
         )
         if evicted:
             self._prune_surfels_to_memory()
+            if self.frame_storage == "resident":
+                self._pending_payload_evictions.extend(evicted)
 
         retained_memory = self.get_allowed_memory_indices()
         section_end_frame = max(new_frame_indices)
@@ -617,10 +641,12 @@ class VMemPipeline:
         
         # Encode the image embeddings for the image_encoder
         self.encoder_embeddings = [encode_image(image_tensor, self.image_encoder, self.device, self.dtype).detach().cpu().numpy()[0]]
+        self.latents = [owned_frame_array(value, self.frame_storage) for value in self.latents]
+        self.encoder_embeddings = [owned_frame_array(value, self.frame_storage) for value in self.encoder_embeddings]
         
         # Store camera pose and intrinsics
         self.c2ws = [c2w]
-        self.Ks = [K]
+        self.Ks = [owned_frame_array(K, self.frame_storage)]
         
         # Convert to PIL and store
         pil_frame = tensor_to_pil(image_tensor)
@@ -1535,8 +1561,10 @@ class VMemPipeline:
         while len(self.surfel_depths) <= max_time_index:
             self.surfel_depths.append(None)
         for local_idx, time_idx in enumerate(input_time_indices):
-            self.surfel_Ks[time_idx] = focal_lengths[local_idx]
-            self.surfel_depths[time_idx] = depths[local_idx].detach().cpu().numpy()
+            self.surfel_Ks[time_idx] = owned_frame_array(focal_lengths[local_idx], self.frame_storage)
+            self.surfel_depths[time_idx] = owned_frame_array(
+                depths[local_idx].detach().cpu().numpy(), self.frame_storage
+            )
         # Resize pointcloud
         pointcloud = pointcloud.permute(0, 3, 1, 2)
         pointcloud = F.interpolate(
@@ -1749,6 +1777,11 @@ class VMemPipeline:
             List of all generated PIL frames
         """
 
+        if self.frame_storage == "resident":
+            if self._pending_payload_evictions or self.durable_frame_count != len(self.pil_frames):
+                raise RuntimeError("Commit durable output and payload eviction before the next action")
+            if len(c2ws_tensor) != 4:
+                raise ValueError("Resident storage requires one four-frame action per commit")
         padding_size = 0
         # Determine generation steps based on trajectory length
         generation_steps = (len(c2ws_tensor) + 1 - self.config.model.num_frames) // self.config.model.target_num_frames + 2
@@ -1846,9 +1879,9 @@ class VMemPipeline:
             new_memory_indices = []
             for j in range(target_num - padding_size if padding_size > 0 else target_num):
                 global_frame_idx = len(self.pil_frames)
-                self.latents.append(target_latents[j].detach().cpu().numpy())
-                self.encoder_embeddings.append(target_encoder_embeddings[j].detach().cpu().numpy())
-                self.Ks.append(target_Ks[j].detach().cpu().numpy())
+                self.latents.append(owned_frame_array(target_latents[j].detach().cpu().numpy(), self.frame_storage))
+                self.encoder_embeddings.append(owned_frame_array(target_encoder_embeddings[j].detach().cpu().numpy(), self.frame_storage))
+                self.Ks.append(owned_frame_array(target_Ks[j].detach().cpu().numpy(), self.frame_storage))
                 self.c2ws.append(target_c2ws[j].detach().cpu().numpy())
                 self.pil_frames.append(target_pil_frames[j])
                 new_memory_indices.append(global_frame_idx)

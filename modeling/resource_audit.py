@@ -14,15 +14,17 @@ import time
 
 import numpy as np
 from PIL import Image
+from frame_storage import payload_summary
 
 
-SCHEMA_VERSION = "vmem_resources_v1"
+SCHEMA_VERSION = "vmem_resources_v2"
 HISTORY_COMPONENTS = (
     "pil_frames", "latents", "encoder_embeddings", "c2ws", "Ks",
     "surfel_depths", "surfel_Ks", "surfels", "surfel_to_timestep",
     "poses", "focal_lengths", "_dino_feature_cache",
     "memory_buffer", "retrieval_trace", "memory_events",
     "denoiser", "sampler", "_active_target_frame_indices",
+    "_pending_payload_evictions",
 )
 
 
@@ -127,6 +129,7 @@ def memory_snapshot(pipeline, extra_components=None, torch_module=None):
             idx in eligible_set for values in pipeline.surfel_to_timestep.values() for idx in values
         ),
         "appearance_descriptor_sources": getattr(pipeline, "memory_descriptor_sources", {}),
+        "frame_payloads": payload_summary(pipeline),
     }
 
 
@@ -186,6 +189,8 @@ class ResourceProfiler:
             self.torch.cuda.synchronize(self.device)
 
     def begin_step(self, pipeline):
+        if self.active:
+            raise RuntimeError("Finish the previous action's storage commit before profiling another")
         self.active = True
         self.step = int(pipeline.global_step)
         self.times = {}
@@ -222,7 +227,11 @@ class ResourceProfiler:
     def capture_before_update(self, pipeline):
         self.before_update = self.capture(pipeline)
 
-    def finish_step(self, pipeline):
+    def finish_step(self, pipeline, *, storage_ready=False):
+        if getattr(pipeline, "frame_storage", "legacy") == "resident" and not storage_ready:
+            # The runner writes PNGs, releases evictions and drops temporary
+            # action references before taking the final resident snapshot.
+            return
         after_update = self.capture(pipeline)
         self.write({
             "event": "step", "schema": SCHEMA_VERSION, "step": self.step,
@@ -234,6 +243,8 @@ class ResourceProfiler:
             "accounting_seconds": self.accounting_seconds,
             "reconstruction_input_indices": self.reconstruction_input_indices,
             "before_update": self.before_update, "after_update": after_update,
+            "after_update_boundary": ("durable_output_and_payload_release" if storage_ready
+                                      else "pipeline_policy_update"),
         })
         self.active = False
 

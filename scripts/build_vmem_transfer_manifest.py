@@ -10,11 +10,13 @@ SCENES = ("oxford", "jesus", "living_room", "open_door", "changi")
 TRAJECTORIES = (("pan_45", 0.1), ("pan_90", 0.1), ("out_and_back", 0.02))
 
 
-def build_rows():
+def build_rows(version="v1"):
+    if version not in {"v1", "v2"}:
+        raise ValueError(f"Unknown transfer protocol: {version}")
     rows = []
     for scene_index, scene in enumerate(SCENES):
         for trajectory_index, (trajectory, step_size) in enumerate(TRAJECTORIES):
-            case_id = f"transfer_v1_{scene}_{trajectory}"
+            case_id = f"transfer_{version}_{scene}_{trajectory}"
             common = {
                 "image": f"test_samples/{scene}.jpg", "trajectory": trajectory,
                 "step_size": step_size, "duration_seconds": 60, "fps": 13,
@@ -23,6 +25,8 @@ def build_rows():
                 "memory_scope": "surfel_indexed_view_memory",
                 "_case_id": case_id,
             }
+            if version == "v2":
+                common["frame_storage"] = "resident"
             rows.append({**common, "run_id": f"{case_id}_unbounded", "memory_policy": "unbounded"})
             rows.append({**common, "run_id": f"{case_id}_geocov32",
                          "memory_policy": "slam_covisibility", "memory_budget": 32})
@@ -31,13 +35,15 @@ def build_rows():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", type=Path, default=Path("manifests/vmem_transfer_v1.jsonl"))
+    parser.add_argument("--version", choices=("v1", "v2"), default="v1")
+    parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    rows = build_rows()
+    rows = build_rows(args.version)
+    args.output = args.output or Path(f"manifests/vmem_transfer_{args.version}.jsonl")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     # Refuse to overwrite an already frozen protocol; choose a new output path.
     with args.output.open("x", encoding="utf-8") as handle:
-        handle.write("# VMem external transfer v1: 15 matched cases, unbounded vs adapted GeoCov-32.\n")
+        handle.write(f"# VMem external transfer {args.version}: 15 matched cases, unbounded vs adapted GeoCov-32.\n")
         for row in rows:
             handle.write(json.dumps(row) + "\n")
     print(f"Wrote {len(rows)} runs to {args.output}. Rows 0-1 are the Oxford pilot.")

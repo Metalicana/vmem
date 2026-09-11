@@ -1,5 +1,22 @@
 # VMem Memory Ownership and Measurement Audit
 
+## 2026-09-09 Resident Storage Implementation
+
+New `--frame-storage resident` releases evicted RGB, latent, embedding,
+intrinsic and depth payloads after durable PNG output. Navigator image history
+is disabled; resume restores only retained images; MP4 export streams from disk.
+See [the v2 contract and CECSL validation gate](VMEM_RESIDENT_MEMORY.md).
+Implementation and new tests are authored, **not yet executed on CECSL**.
+No local tests or generation were run. The original Oxford pair passed the
+user-run inventory but remains an eligibility-only result.
+
+The audit below describes **legacy storage**, still the default for old
+manifests. Its "no release" entries are not the resident-mode contract.
+Resident mode still retains small pose/focal and diagnostic history, and does
+not establish constant total RAM/VRAM or a fixed surfel count.
+
+## Historical Legacy Audit
+
 2026-09-08 update: new runs now have per-action PNGs and rolling recovery
 checkpoints; see [recovery ownership and restart notes](VMEM_RESTART.md).
 This does not release histories or change B's meaning. `runner_frame_hashes`
@@ -7,8 +24,11 @@ adds one SHA-256 string per durable frame. Checkpoint serialization/copying can
 increase host peaks and disk use, and its cost is logged separately in
 `recovery_trace.jsonl`. Restoring NumPy/PIL objects may change backing-storage
 layout, while CUDA allocator peaks reset per process; default resource plots
-exclude resumed pairs. These additions are untested, and the CPU pass below
-predates them. No local tests/generation were run.
+exclude resumed pairs. The user reports the updated unit tests pass and supplied
+resumed-smoke metadata/status showing 13 frames, two restored actions and
+`complete`. This confirms reported recovery completion, not bitwise equivalence
+or full resource/video validation. The detailed CPU pass below predates these
+additions. No local tests/generation were run.
 
 Audit date: 2026-09-06; validation update: 2026-09-07. Static code audit of our
 VMem fork. The user reported all 38 CPU tests passing on CECSL, including the

@@ -36,6 +36,7 @@ SUPPORTED_KEYS = {
     "save_frames": "--save-frames",
     "visualize_intermediates": "--visualize-intermediates",
     "checkpoint_every": "--checkpoint-every",
+    "frame_storage": "--frame-storage",
 }
 
 

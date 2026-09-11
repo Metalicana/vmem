@@ -1,5 +1,20 @@
 # VMem External Transfer: Audit and MemCam Handoff
 
+## 2026-09-09 Resident Memory Follow-Up
+
+The user supplied a validated Oxford v1 pair: both 781-frame, 576x576, 13-fps
+videos passed the inventory. Resource plots/CSV show lower RAM and recorded
+peak CUDA allocation for GeoCov, but higher persistent depth backing storage.
+This is an eligibility-only pilot, not a physical frame-payload bound. No
+paired quality metrics are available.
+
+Resident payload eviction, disk-streamed export, retained-only image recovery
+and stricter instrumentation are now implemented for transfer v2. CECSL tests
+and the 49-frame pause/resume gate remain pending. Follow
+[VMEM_RESIDENT_MEMORY.md](VMEM_RESIDENT_MEMORY.md) before launching further runs.
+Do not mix v1 and v2 resource measurements. GeoCov scoring and the paired
+generation settings are unchanged; total process memory is still not bounded.
+
 ## 2026-09-08 Recovery Update
 
 The user-reported Oxford unbounded attempt stopped after action index 189
@@ -8,11 +23,16 @@ The user-reported Oxford unbounded attempt stopped after action index 189
 The original runner saved no incremental image/state checkpoint and cannot
 resume that attempt. Keep the old output directory and lock as failure evidence.
 
-Recovery support is now implemented but **not yet tested on CECSL**: per-action
+Recovery support is now implemented: per-action
 atomic PNGs, rolling state/RNG checkpoints every five actions, new-directory
 resume, process-session labelling and persistent launcher logs. See
 [restart and validation instructions](VMEM_RESTART.md). The 38-test CPU pass
-below predates this change. No tests or generation were run on the Mac.
+below predates this change. On 2026-09-08 the user reported the updated tests
+pass, without a new count/transcript or source hash. The resumed smoke run's
+supplied metadata/status subsequently showed 13 frames, two restored actions
+and `complete` (PID 3628384). Recovery completed as expected by those records;
+decoded video integrity and uninterrupted/resumed numerical parity remain
+unverified. No tests or generation were run on the Mac.
 
 The unchanged 15-case manifest must be executed under a **new source/config
 lock and output root** after checks. GeoCov scoring and inference settings are

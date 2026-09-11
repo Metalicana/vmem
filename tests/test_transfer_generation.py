@@ -108,6 +108,18 @@ class TransferGenerationTest(unittest.TestCase):
             self.assertEqual(sentinel.read_text(), "keep")
             self.assertTrue(own_dir.is_dir())
 
+    def test_headless_navigator_does_not_keep_initial_image_alias(self):
+        module = ast.parse((ROOT / "navigation.py").read_text())
+        cls = next(node for node in module.body if isinstance(node, ast.ClassDef) and node.name == "Navigator")
+        method = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == "initialize")
+        namespace = {"os": os, "np": np}
+        exec(compile(ast.Module(body=[method], type_ignores=[]), "navigation.py", "exec"), namespace)
+        with tempfile.TemporaryDirectory() as tmp:
+            pipeline = SimpleNamespace(visualize_dir=tmp, initialize=lambda *args: "image")
+            navigator = SimpleNamespace(pipeline=pipeline, pose_history=[], retain_frame_history=False)
+            self.assertEqual(namespace["initialize"](navigator, None, np.eye(4), np.eye(3)), "image")
+            self.assertEqual(navigator.frames, [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -62,6 +62,7 @@ def expected_settings(row):
         "surfel_reconstruction_window": row.get("surfel_reconstruction_window"),
         "resource_trace": True, "profile_warmup_steps": 2,
         "checkpoint_every": row.get("checkpoint_every", 5),
+        "frame_storage": row.get("frame_storage", "legacy"),
         "visualize_intermediates": row.get("visualize_intermediates", False),
     }
     num_actions = row.get("num_actions")
@@ -86,7 +87,11 @@ def verify_lock(lock_path, arguments, provenance):
     if provenance["image_sha256"] != lock["image_sha256"][expected["image"]]:
         raise ValueError("Experiment lock mismatch: input image")
     for key, value in expected_settings(expected).items():
-        if key == "checkpoint_every" and lock.get("schema") != "vmem_experiment_lock_v2":
+        if key == "checkpoint_every" and lock.get("schema") not in {"vmem_experiment_lock_v2", "vmem_experiment_lock_v3"}:
+            continue
+        if key == "frame_storage" and lock.get("schema") != "vmem_experiment_lock_v3":
+            if arguments.get(key, "legacy") != "legacy" or value != "legacy":
+                raise ValueError("Resident storage requires a new v3 experiment lock")
             continue
         actual = arguments.get(key)
         if isinstance(actual, Path):

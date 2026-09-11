@@ -60,7 +60,7 @@ def freeze(args):
             "units": "Navigator units; not reconstructed coverage or meters",
         }
     first = _generation_provenance(Path(rows[0]["image"]), args.config)
-    lock = {"schema": "vmem_experiment_lock_v2", "manifest": str(args.manifest),
+    lock = {"schema": "vmem_experiment_lock_v3", "manifest": str(args.manifest),
             "manifest_sha256": file_hash(args.manifest), "config": str(args.config),
             "config_sha256": first["config_sha256"], "source_sha256": first["source_sha256"],
             "git_commit": first["git_commit"], "rows": rows,
@@ -108,7 +108,7 @@ def validate_actions(actions, settings):
 
 def read_resource_steps(path):
     events = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
-    if not events or events[0].get("schema") != "vmem_resources_v1":
+    if not events or events[0].get("schema") not in {"vmem_resources_v1", "vmem_resources_v2"}:
         raise ValueError("Missing or unknown resource trace schema")
     return [event for event in events if event["event"] == "step"]
 
@@ -159,6 +159,54 @@ def validate_resources(steps, settings):
         if settings["memory_policy"] == "slam_covisibility":
             if sum(memory["appearance_descriptor_sources"].values()) <= 0:
                 raise ValueError("GeoCov appearance descriptor was not logged")
+        mode = settings.get("frame_storage", "legacy")
+        if memory.get("frame_payloads", {}).get("mode", "legacy") != mode:
+            raise ValueError("Frame storage mode differs from the frozen protocol")
+        if mode == "resident":
+            if step.get("after_update_boundary") != "durable_output_and_payload_release":
+                raise ValueError("Resident snapshot was taken before payload release")
+            seconds = step["phase_seconds"]["payload_eviction"]
+            if not math.isfinite(seconds) or seconds < 0:
+                raise ValueError("Missing or invalid payload-eviction timing")
+            previous_count = step["frame_count"] - settings["frames_per_action"]
+            previous_bank = set(steps[index - 1]["after_update"]["eligible_frame_indices"]) if index else {0}
+            prospective = previous_bank | set(range(previous_count, step["frame_count"]))
+            validate_payload_snapshot(step["before_update"], prospective, previous_count)
+            validate_payload_snapshot(memory, set(eligible), step["frame_count"])
+            if memory["components"]["navigator_frames"]["live_items"]:
+                raise ValueError("Navigator retained frame aliases")
+
+
+def validate_payload_snapshot(snapshot, expected_indices, durable_frames):
+    payload = snapshot["frame_payloads"]
+    if payload["schema"] != "vmem_resident_frames_v1" or payload["mode"] != "resident":
+        raise ValueError("Missing resident-payload accounting")
+    fields = {"pil_frames", "latents", "encoder_embeddings", "Ks", "surfel_depths"}
+    if set(payload["resident_indices"]) != fields or set(payload["logical_bytes"]) != fields:
+        raise ValueError("Incomplete resident-payload accounting")
+    for name in fields:
+        ids = payload["resident_indices"][name]
+        if len(ids) != len(set(ids)) or set(ids) != expected_indices:
+            raise ValueError(f"Resident {name} leaked or lost a required frame")
+        if payload["resident_counts"][name] != len(ids) or snapshot["components"][name]["live_items"] != len(ids):
+            raise ValueError(f"Resident {name} count mismatch")
+        if not isinstance(payload["logical_bytes"][name], int) or payload["logical_bytes"][name] <= 0:
+            raise ValueError(f"Missing resident {name} bytes")
+    if payload["total_logical_bytes"] != sum(payload["logical_bytes"].values()):
+        raise ValueError("Resident-payload byte total mismatch")
+    if not payload["arrays_own_storage"] or payload["pending_evictions"]:
+        raise ValueError("Shared backing storage or uncommitted evictions remain")
+    if payload["durable_frames"] != durable_frames:
+        raise ValueError("Durable output does not match the storage boundary")
+
+
+def validate_frame_manifest(path, expected_count):
+    data = json.loads((path / "frame_manifest.json").read_text())
+    if data.get("schema") != "vmem_output_frames_v1" or len(data["sha256"]) != expected_count:
+        raise ValueError("Incomplete disk-output frame manifest")
+    for index, expected_hash in enumerate(data["sha256"]):
+        if file_hash(path / "generated_frames" / f"{index:04d}.png") != expected_hash:
+            raise ValueError(f"Durable output frame {index} differs from its recorded hash")
 
 
 def validate_snapshot(memory):
@@ -239,6 +287,8 @@ def inspect_attempt(path, row, lock_path, lock):
             return item
         metadata = json.loads((path / "metadata.json").read_text())
         settings = expected_settings(row)
+        if metadata.get("frame_storage", "legacy") != settings["frame_storage"]:
+            raise ValueError("Metadata frame storage differs from frozen settings")
         for key in ("run_id", "seed", "image", "trajectory", "fps", "step_size", "frames_per_action", "num_actions", "memory_policy", "memory_budget", "memory_scope"):
             if metadata.get(key) != settings[key]:
                 raise ValueError(f"Metadata mismatch: {key}")
@@ -265,6 +315,10 @@ def inspect_attempt(path, row, lock_path, lock):
         validate_retrieval(json.loads((path / "retrieval_trace.json").read_text()), steps)
         video = probe_video(path / "generated.mp4")
         expected_frames = 1 + settings["num_actions"] * settings["frames_per_action"]
+        if settings["frame_storage"] == "resident":
+            validate_frame_manifest(path, expected_frames)
+            if metadata["frame_payloads"] != steps[-1]["after_update"]["frame_payloads"]:
+                raise ValueError("Final resident-payload metadata differs from trace")
         if metadata["actual_frames"] != expected_frames or video["frames"] != expected_frames:
             raise ValueError("Decoded video frame count mismatch")
         if (video["width"], video["height"]) != (expected_config["model"]["width"], expected_config["model"]["height"]):
@@ -306,6 +360,46 @@ def inventory(args):
     print(f"Validated pairs: {sum(p['validated_pair'] for p in pairs)}/{len(pairs)}. All attempts saved to {args.output}.")
 
 
+def storage_smoke(args):
+    path = args.run_dir
+    spec = json.loads((path / "run_spec.json").read_text())
+    metadata = json.loads((path / "metadata.json").read_text())
+    status = json.loads((path / "run_status.json").read_text())
+    settings = expected_settings(spec["arguments"])
+    if (status.get("status") != "complete" or settings["frame_storage"] != "resident"
+            or settings["memory_policy"] != "slam_covisibility" or settings["memory_budget"] != 32
+            or settings["num_actions"] != 12 or settings["frames_per_action"] != 4):
+        raise ValueError("Expected a completed 12-action, resident GeoCov-32 smoke run")
+    current = _generation_provenance(Path(settings["image"]), Path(spec["arguments"]["config"]))
+    for key in ("source_sha256", "config_sha256", "image_sha256"):
+        if current[key] != spec["provenance"][key]:
+            raise ValueError(f"Smoke run does not match current {key}")
+    if metadata["provenance"] != spec["provenance"] or metadata["recovery"] != spec["recovery"]:
+        raise ValueError("Smoke metadata and specification differ")
+    if spec["recovery"]["schema"] != "vmem_recovery_v2":
+        raise ValueError("Smoke run does not use resident-aware recovery")
+    resume = spec["recovery"].get("resume")
+    if resume is None or resume["completed_actions"] != 10:
+        raise ValueError("Pause after 10 actions and resume to exercise recovery after eviction")
+    validate_actions(json.loads((path / "actions.json").read_text()), settings)
+    steps = read_resource_steps(path / "resource_trace.jsonl")
+    validate_resources(steps, settings)
+    validate_retrieval(json.loads((path / "retrieval_trace.json").read_text()), steps)
+    validate_frame_manifest(path, 49)
+    video = probe_video(path / "generated.mp4")
+    if (video["frames"] != 49 or metadata["actual_frames"] != 49
+            or (video["width"], video["height"]) != (576, 576)
+            or abs(video["fps"] - settings["fps"]) > 1e-6
+            or abs(video["seconds"] - 49 / settings["fps"]) > 1 / settings["fps"]):
+        raise ValueError("Smoke video does not contain all 49 frames at the expected format")
+    payload = steps[-1]["after_update"]["frame_payloads"]
+    if metadata["frame_storage"] != "resident" or metadata["frame_payloads"] != payload:
+        raise ValueError("Smoke final payload metadata differs from trace")
+    print(json.dumps({"status": "validated", "video": video, "resumed_after_actions": 10,
+                      "resident_counts": payload["resident_counts"], "durable_frames": payload["durable_frames"],
+                      "arrays_own_storage": payload["arrays_own_storage"]}, indent=2))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -317,8 +411,10 @@ def main():
     audit_parser.add_argument("--lock", type=Path, required=True)
     audit_parser.add_argument("--output-root", type=Path, required=True)
     audit_parser.add_argument("--output", type=Path, required=True)
+    smoke_parser = sub.add_parser("storage-smoke")
+    smoke_parser.add_argument("--run-dir", type=Path, required=True)
     args = parser.parse_args()
-    freeze(args) if args.command == "freeze" else inventory(args)
+    {"freeze": freeze, "inventory": inventory, "storage-smoke": storage_smoke}[args.command](args)
 
 
 if __name__ == "__main__":
