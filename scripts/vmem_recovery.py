@@ -15,7 +15,7 @@ import time
 
 import numpy as np
 from PIL import Image
-from frame_storage import validate_resident_payloads
+from frame_storage import restore_resident_array_ownership, validate_resident_payloads
 
 
 SCHEMA = "vmem_recovery_v2"
@@ -250,6 +250,7 @@ def restore_into_new_attempt(source_dir, run_dir, state, pipeline, navigator):
     navigator.pose_history = saved_navigator["pose_history"]
     navigator.frames = [frames[index] for index in saved_navigator["frame_indices"]]
     navigator.retain_frame_history = getattr(pipeline, "frame_storage", "legacy") != "resident"
+    restore_resident_array_ownership(pipeline)
     validate_resident_payloads(pipeline)
     if state["has_dino_extractor"]:
         pipeline._dino_extractor_instance()

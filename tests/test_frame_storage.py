@@ -12,7 +12,10 @@ import weakref
 import numpy as np
 from PIL import Image
 
-from frame_storage import owned_frame_array, payload_summary, release_evicted_payloads, validate_resident_payloads
+from frame_storage import (
+    ARRAY_FIELDS, owned_frame_array, payload_summary, release_evicted_payloads,
+    restore_resident_array_ownership, validate_resident_payloads,
+)
 from scripts import vmem_recovery as recovery
 from scripts.vmem_protocol import expected_settings, verify_lock
 from scripts.build_vmem_transfer_manifest import build_rows
@@ -159,6 +162,51 @@ class FrameStorageTest(unittest.TestCase):
         self.assertTrue(array.flags.owndata)
         self.assertFalse(np.shares_memory(array, root))
 
+    def test_restore_ownership_releases_backing_batches_without_changing_values(self):
+        pipeline = fixture()
+        pipeline.latents = [np.full((16, 72, 72), 0.125, dtype=np.float16)]
+        pipeline.surfel_depths = [np.full((256, 256), 2.0, dtype=np.float32)]
+        pipeline.surfel_Ks = [np.array([123.0], dtype=np.float32)]
+        pipeline._dino_feature_cache = {0: np.ones(8, dtype=np.float32)}
+        pipeline.durable_frame_count = 1
+        pose = pipeline.c2ws[0]
+        containers = [getattr(pipeline, name) for name in (*ARRAY_FIELDS, "surfel_Ks")]
+        containers.append(pipeline._dino_feature_cache)
+        expected, roots = [], []
+        for values in containers:
+            value = values[0]
+            expected.append(value.copy())
+            root = np.empty((3, *value.shape), dtype=value.dtype)
+            root[1] = value
+            values[0] = root[1]
+            roots.append(weakref.ref(root))
+        del root
+        with self.assertRaisesRegex(ValueError, r"latents\[0\].*backing storage"):
+            validate_resident_payloads(pipeline)
+        restore_resident_array_ownership(pipeline)
+        for values, original in zip(containers, expected):
+            np.testing.assert_array_equal(values[0], original)
+            self.assertEqual(values[0].dtype, original.dtype)
+            self.assertTrue(values[0].flags.owndata)
+        self.assertTrue(all(root() is None for root in roots))
+        self.assertIs(pipeline.c2ws[0], pose)
+        self.assertTrue(validate_resident_payloads(pipeline)["arrays_own_storage"])
+        owned_latent = pipeline.latents[0]
+        restore_resident_array_ownership(pipeline)
+        self.assertIs(pipeline.latents[0], owned_latent)
+
+    def test_restore_ownership_leaves_legacy_storage_untouched(self):
+        pipeline = fixture("legacy")
+        root = np.ones((4, 8), dtype=np.float32)
+        pipeline.latents = [root[1]]
+        pipeline.surfel_Ks = [root[2]]
+        pipeline._dino_feature_cache = {0: root[3]}
+        values = (pipeline.latents[0], pipeline.surfel_Ks[0], pipeline._dino_feature_cache[0])
+        restore_resident_array_ownership(pipeline)
+        for before, after in zip(values, (pipeline.latents[0], pipeline.surfel_Ks[0], pipeline._dino_feature_cache[0])):
+            self.assertIs(before, after)
+            self.assertTrue(np.shares_memory(after, root))
+
     def test_unbounded_still_retains_every_frame(self):
         pipeline = fixture(policy="unbounded")
         with tempfile.TemporaryDirectory() as tmp:
@@ -194,6 +242,12 @@ class FrameStorageTest(unittest.TestCase):
 
 class ResidentRecoveryTest(unittest.TestCase):
     def test_checkpoint_resume_loads_only_retained_images_and_exports_all_frames(self):
+        self.check_checkpoint_resume(buffer_backed=False)
+
+    def test_checkpoint_resume_normalizes_buffer_backed_arrays(self):
+        self.check_checkpoint_resume(buffer_backed=True)
+
+    def check_checkpoint_resume(self, buffer_backed):
         try:
             import torch
         except ImportError:
@@ -213,19 +267,51 @@ class ResidentRecoveryTest(unittest.TestCase):
                 recovery.save_new_frames(source, pipeline.pil_frames, hashes)
                 release_evicted_payloads(pipeline, len(hashes))
                 records.append({"action_index": index})
+            if buffer_backed:
+                for index in pipeline.get_allowed_memory_indices():
+                    pipeline.latents[index] = np.full((16, 72, 72), index, dtype=np.float16)
+                    pipeline.surfel_depths[index] = np.full((256, 256), index, dtype=np.float32)
+                pipeline.surfel_Ks = [np.array([value], dtype=np.float32) for value in pipeline.surfel_Ks]
+                pipeline._dino_feature_cache = {0: np.ones(1024, dtype=np.float32)}
             recovery.save_checkpoint(source, pipeline, navigator, records, hashes, run_identity, torch)
             state, _ = recovery.load_checkpoint(source, run_identity, torch, "cpu")
             self.assertEqual(len(state["resident_frame_indices"]), 32)
             self.assertEqual(sum(value is not None for value in state["pipeline"]["latents"]), 32)
+            if buffer_backed:
+                # Force the runtime representation from the CECSL failure,
+                # independent of this environment's NumPy/pickle behavior.
+                for name in (*ARRAY_FIELDS, "surfel_Ks"):
+                    values = state["pipeline"][name]
+                    for index, value in enumerate(values):
+                        if value is not None:
+                            values[index] = np.frombuffer(value.tobytes(), dtype=value.dtype).reshape(value.shape)
+                cache = state["pipeline"]["_dino_feature_cache"]
+                cache[0] = np.frombuffer(cache[0].tobytes(), dtype=cache[0].dtype)
+                self.assertFalse(state["pipeline"]["latents"][0].flags.owndata)
+            saved_rng = state["rng"]
             restored = fixture()
             real_open = Image.open
             with patch.object(recovery.Image, "open", wraps=real_open) as opened:
-                restored_records, restored_hashes, _ = recovery.restore_into_new_attempt(
+                restored_records, restored_hashes, restored_rng = recovery.restore_into_new_attempt(
                     source, target, state, restored, navigator,
                 )
                 self.assertEqual(opened.call_count, 32)
+            self.assertIs(restored_rng, saved_rng)
             self.assertEqual(len(restored.pil_frames), 41)
             self.assertFalse(navigator.frames)
+            self.assertEqual(validate_resident_payloads(restored), payload_summary(pipeline))
+            self.assertEqual(restored.get_allowed_memory_indices(), pipeline.get_allowed_memory_indices())
+            for name in (*ARRAY_FIELDS, "surfel_Ks"):
+                for before, after in zip(getattr(pipeline, name), getattr(restored, name)):
+                    if before is None:
+                        self.assertIsNone(after)
+                    else:
+                        np.testing.assert_array_equal(after, before)
+                        if isinstance(before, np.ndarray):
+                            self.assertEqual(after.dtype, before.dtype)
+            for index, before in pipeline._dino_feature_cache.items():
+                np.testing.assert_array_equal(restored._dino_feature_cache[index], before)
+                self.assertTrue(restored._dino_feature_cache[index].flags.owndata)
             for index in range(10, 12):
                 advance(restored)
                 recovery.save_new_frames(target, restored.pil_frames, restored_hashes)

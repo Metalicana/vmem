@@ -16,6 +16,23 @@ def owned_frame_array(value, mode):
     return np.asarray(value).copy() if mode == "resident" else value
 
 
+def restore_resident_array_ownership(pipeline):
+    """Re-establish per-frame allocations after checkpoint deserialization."""
+    if getattr(pipeline, "frame_storage", "legacy") != "resident":
+        return
+    # Deserialization can produce buffer-backed arrays even from owned inputs.
+    # Keep tombstones and the small focal history exactly where they were.
+    for name in (*ARRAY_FIELDS, "surfel_Ks"):
+        values = getattr(pipeline, name, [])
+        for index, value in enumerate(values):
+            if isinstance(value, np.ndarray) and not value.flags.owndata:
+                values[index] = value.copy()
+    cache = getattr(pipeline, "_dino_feature_cache", {})
+    for index, value in cache.items():
+        if not value.flags.owndata:
+            cache[index] = value.copy()
+
+
 def payload_summary(pipeline):
     indices, logical_bytes = {}, {}
     owns_storage = True
@@ -58,7 +75,10 @@ def validate_resident_payloads(pipeline):
         if set(ids) != expected:
             raise ValueError(f"Resident {name} does not match the eligible bank")
     if not summary["arrays_own_storage"]:
-        raise ValueError("A resident array retains shared backing storage")
+        for name in ARRAY_FIELDS:
+            for index in summary["resident_indices"][name]:
+                if not getattr(pipeline, name)[index].flags.owndata:
+                    raise ValueError(f"Resident {name}[{index}] does not own its backing storage")
     cache = getattr(pipeline, "_dino_feature_cache", {})
     if not set(cache).issubset(allowed) or any(not value.flags.owndata for value in cache.values()):
         raise ValueError("Feature cache retains evicted payloads or shared backing storage")

@@ -1,8 +1,12 @@
 # Resident Frame Memory: Transfer v2
 
-2026-09-09. Implementation added; CECSL unit tests and GPU validation are
-**pending**. No tests, dry runs, generation or metrics were executed on the Mac.
-Prior test passes and the validated Oxford pair apply to the earlier code.
+2026-09-11. CECSL reported **57 CPU tests passing** on `3a95795`. The resident
+GPU smoke paused successfully after 10 actions (41 frames, exceeding B=32),
+but resume failed its array-ownership check before generating another action.
+Checkpoint restoration now copies non-owning resident arrays before validation;
+tests for buffer-backed arrays and a fresh GPU pause/resume are **pending**.
+No tests, dry runs, generation or metrics were executed on the Mac. The earlier
+validated Oxford pair still applies to legacy storage, not resident transfer v2.
 
 ## Contract
 
@@ -61,8 +65,18 @@ The estimator's list/object overhead includes the growing tombstone metadata.
 small historical state), the retained image IDs, RNG and hashes of all output
 frames. Resume verifies/copies every PNG into a new attempt but decodes only
 the retained images into RAM. It never makes an evicted frame eligible again.
+Deserialized resident arrays are given independent backing allocations when
+needed, including cached descriptors and small focal entries, before the strict
+bank/ownership checks. This preserves values, dtypes, global IDs and tombstones;
+it does not reload evicted payloads or change the controller. Legacy restoration
+is unchanged.
 Old recovery-v1 checkpoints cannot be resumed with this source version. Keep
 them and their original code/locks intact as historical evidence.
+
+Recovery also requires identical source hashes. The September 11 ownership fix
+changes those hashes: preserve the paused `3a95795` smoke and its failed resume,
+but start a fresh smoke under the fixed code rather than bypassing identity
+checks. Do not edit code or pull changes between the new pause and resume.
 
 The final MP4 is streamed from PNGs, independently of the active bank.
 `frame_manifest.json` records every PNG hash. No original output is deleted.
@@ -95,29 +109,40 @@ CUDA_VISIBLE_DEVICES="" python -m unittest discover -s tests -v
 Tests include real bank-update/pruning methods with synthetic frame payloads,
 49-frame eviction, collection of old image/depth references, ownership and
 score/bank parity, output streaming, and recovery that decodes only 32 images.
+The recovery regressions also force buffer-backed float16/float32 arrays after
+loading a checkpoint, check value/dtype preservation and tombstones, then
+continue generation with synthetic payloads through 49 output frames. Separate
+checks cover release of oversized backing batches and untouched legacy storage.
 They are not a neural-generation equivalence test or a measured RAM benchmark.
 
 After the tests pass, choose a GPU using a fresh `nvidia-smi`. Selection does not
 reserve VRAM or protect other jobs from contention. Run the short smoke first:
+The output roots below are separate from the failed pre-fix smoke attempts.
 
 ```bash
 GPU=0
 CUDA_VISIBLE_DEVICES="$GPU" python -u scripts/run_vmem_demo_actions.py \
-  --image test_samples/oxford.jpg --run-id resident_smoke \
+  --image test_samples/oxford.jpg --run-id resident_smoke_restorefix \
   --trajectory pan_45 --num-actions 12 --seed 501 \
   --memory-policy slam_covisibility --memory-budget 32 \
   --frame-storage resident --inference-steps 50 --surfel-niter 400 \
-  --stop-after-actions 10 --output-root outputs/vmem_resident_smoke
+  --stop-after-actions 10 --output-root outputs/vmem_resident_smoke_restorefix
 
-PAUSED=$(ls -dt outputs/vmem_resident_smoke/resident_smoke_* | head -n 1)
+PAUSED=$(ls -dt outputs/vmem_resident_smoke_restorefix/resident_smoke_restorefix_* | head -n 1)
+```
+
+Confirm the new attempt reports `paused` after 10 actions, then resume without
+changing the checkout or settings:
+
+```bash
 CUDA_VISIBLE_DEVICES="$GPU" python -u scripts/run_vmem_demo_actions.py \
-  --image test_samples/oxford.jpg --run-id resident_smoke \
+  --image test_samples/oxford.jpg --run-id resident_smoke_restorefix \
   --trajectory pan_45 --num-actions 12 --seed 501 \
   --memory-policy slam_covisibility --memory-budget 32 \
   --frame-storage resident --inference-steps 50 --surfel-niter 400 \
-  --resume-from "$PAUSED" --output-root outputs/vmem_resident_smoke_resumed
+  --resume-from "$PAUSED" --output-root outputs/vmem_resident_smoke_restorefix_resumed
 
-RESUMED=$(ls -dt outputs/vmem_resident_smoke_resumed/resident_smoke_* | head -n 1)
+RESUMED=$(ls -dt outputs/vmem_resident_smoke_restorefix_resumed/resident_smoke_restorefix_* | head -n 1)
 python scripts/audit_vmem_runs.py storage-smoke --run-dir "$RESUMED"
 ```
 
