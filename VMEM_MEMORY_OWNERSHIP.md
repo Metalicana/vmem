@@ -1,14 +1,21 @@
 # VMem Memory Ownership and Measurement Audit
 
-## 2026-09-09 Resident Storage Implementation
+## 2026-09-17 Resident Storage Validation
 
 New `--frame-storage resident` releases evicted RGB, latent, embedding,
 intrinsic and depth payloads after durable PNG output. Navigator image history
 is disabled; resume restores only retained images; MP4 export streams from disk.
 See [the v2 contract and CECSL validation gate](VMEM_RESIDENT_MEMORY.md).
-Implementation and new tests are authored, **not yet executed on CECSL**.
-No local tests or generation were run. The original Oxford pair passed the
-user-run inventory but remains an eligibility-only result.
+The user reports the updated CPU tests passed and supplied a **validated CECSL
+pause/resume smoke**: 49 durable/video frames at 576x576, 13 fps; resumed after
+10 actions; 32 resident entries in each of the five payload components; owned
+array storage. The subsequent resident 60-second Oxford pair also passed the
+user-run inventory (**1/15 validated pairs**), and resource plots were generated
+for one case. The plots/CSVs and videos still await inspection here; no numeric
+savings or quality improvement is claimed. Other GPU occupancy was reported at
+launch, so timing comparisons are potentially contended. No local tests or
+generation were run. The original transfer-v1 Oxford pair remains an
+eligibility-only result, separate from this resident-v2 pair.
 
 The audit below describes **legacy storage**, still the default for old
 manifests. Its "no release" entries are not the resident-mode contract.

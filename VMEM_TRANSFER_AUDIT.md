@@ -1,6 +1,6 @@
 # VMem External Transfer: Audit and MemCam Handoff
 
-## 2026-09-09 Resident Memory Follow-Up
+## 2026-09-17 Resident Memory Follow-Up
 
 The user supplied a validated Oxford v1 pair: both 781-frame, 576x576, 13-fps
 videos passed the inventory. Resource plots/CSV show lower RAM and recorded
@@ -9,9 +9,17 @@ This is an eligibility-only pilot, not a physical frame-payload bound. No
 paired quality metrics are available.
 
 Resident payload eviction, disk-streamed export, retained-only image recovery
-and stricter instrumentation are now implemented for transfer v2. CECSL tests
-and the 49-frame pause/resume gate remain pending. Follow
-[VMEM_RESIDENT_MEMORY.md](VMEM_RESIDENT_MEMORY.md) before launching further runs.
+and stricter instrumentation are now implemented for transfer v2. The user
+reports the updated CECSL CPU tests passed and supplied a validated 49-frame
+pause/resume smoke: resume after 10 actions, 32 resident entries per payload
+component and owned array storage. Both matched 60-second resident Oxford arms
+then completed successfully. The supplied inventory reports **1/15 validated
+pairs**, and the resource plotter reports one measured case. Actual plots/CSVs
+and videos await inspection here; measured savings and quality improvement are
+not yet established. Other GPU occupancy was reported at launch: do not use
+these timings as a controlled idle-GPU speedup comparison. See
+[VMEM_RESIDENT_MEMORY.md](VMEM_RESIDENT_MEMORY.md) for the exact attempts and
+artifact locations; inspect them before launching the remaining cases.
 Do not mix v1 and v2 resource measurements. GeoCov scoring and the paired
 generation settings are unchanged; total process memory is still not bounded.
 

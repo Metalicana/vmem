@@ -1,12 +1,51 @@
 # Resident Frame Memory: Transfer v2
 
-2026-09-11. CECSL reported **57 CPU tests passing** on `3a95795`. The resident
-GPU smoke paused successfully after 10 actions (41 frames, exceeding B=32),
-but resume failed its array-ownership check before generating another action.
-Checkpoint restoration now copies non-owning resident arrays before validation;
-tests for buffer-backed arrays and a fresh GPU pause/resume are **pending**.
+2026-09-16. **The CECSL resident pause/resume smoke passed**, based on the user's
+supplied `storage-smoke` validator output. It validated 49 durable/video frames
+at 576x576 and 13 fps (3.769231 seconds), resume after 10 actions, exactly 32
+resident entries in each of `pil_frames`, `latents`, `encoder_embeddings`, `Ks`
+and `surfel_depths`, and `arrays_own_storage: true`. The user also reported the
+updated CPU tests passed; a new count/transcript was not supplied.
+
+This supersedes the September 11 resume failure on `3a95795` (whose 57 CPU
+tests had passed). Restoration now normalizes non-owning arrays before checking
+ownership. The new smoke's parent is
+`outputs/vmem_resident_smoke_restorefix/resident_smoke_restorefix_pan_45_A12_slam_covisibility_B32_20260916_133928`;
+the supplied validation output does not name the resumed attempt directory.
+
 No tests, dry runs, generation or metrics were executed on the Mac. The earlier
-validated Oxford pair still applies to legacy storage, not resident transfer v2.
+validated transfer-v1 Oxford pair applies to legacy storage, not resident v2.
+
+## Oxford Pair: Validated
+
+2026-09-17. The user supplied successful completion logs for both resident-v2
+Oxford `pan_45` arms (exit code 0, status `complete`) and the subsequent audit:
+**Validated pairs: 1/15**. The resource plotter reported **1 measured case**.
+This is one matched case, not completion of the full transfer suite.
+
+Root: `outputs/vmem_transfer_v2_resident`. Completed attempt directories:
+
+- `transfer_v2_oxford_pan_45_unbounded_pan_45_A195_unbounded_20260916_140544`
+- `transfer_v2_oxford_pan_45_geocov32_pan_45_A195_slam_covisibility_B32_20260917_104717`
+
+Inventory: `outputs/vmem_transfer_v2_resident_inventory.json`.
+Plots/CSVs: `outputs/vmem_transfer_v2_resident_analysis`.
+The validator checks completed videos, provenance, commanded actions, resource
+traces, resident-bank constraints and retrieval eligibility. The actual plots,
+CSVs and videos have not yet been inspected in this workspace; no numeric
+savings or quality improvement is asserted from these success messages alone.
+
+The user reports roughly 23 GB of other GPU occupancy at the earlier launch.
+Co-tenancy throughout each arm is not established by the supplied logs. Treat
+these timings as potentially contended, not a controlled idle-GPU speedup
+measurement. Preserve the runs and inspect their resource/video results before
+launching the remaining cases. Quality metrics and constant total RAM/VRAM
+claims remain unestablished.
+
+For quality scores on this existing pair, use [VMEM_QUALITY.md](VMEM_QUALITY.md).
+The new evaluator follows the MemCam/WorldMem VBench-Long custom-input protocol;
+it does not regenerate the videos. Scoring and evaluator tests remain pending
+CECSL execution.
 
 ## Contract
 
