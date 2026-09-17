@@ -1,4 +1,6 @@
 import copy
+from contextlib import redirect_stderr
+import io
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -219,6 +221,34 @@ class QualityResultsTest(unittest.TestCase):
 
 
 class QualityRunnerTest(unittest.TestCase):
+    def test_failed_log_prints_tail_instead_of_generic_exit_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "evaluate.log"
+            path.write_text("early line\n" + "progress\n" * 100 + "ModuleNotFoundError: missing dependency\n")
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                quality.report_failed_log(path)
+            self.assertIn("ModuleNotFoundError: missing dependency", stderr.getvalue())
+            self.assertNotIn("early line", stderr.getvalue())
+            self.assertIn(str(path), stderr.getvalue())
+
+    def test_missing_log_does_not_mask_original_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                quality.report_failed_log(Path(tmp) / "absent.log")
+            self.assertIn("Could not read evaluator log", stderr.getvalue())
+
+    def test_failed_log_read_is_bounded_and_tolerates_invalid_utf8(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "evaluate.log"
+            path.write_bytes(b"x" * 32768 + b"\xff\nRuntimeError: evaluator failed\n")
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                quality.report_failed_log(path)
+            self.assertIn("RuntimeError: evaluator failed", stderr.getvalue())
+            self.assertLess(len(stderr.getvalue()), 17000)
+
     def test_mocked_runner_stages_unchanged_pair_and_writes_signed_scores(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -238,6 +268,10 @@ class QualityRunnerTest(unittest.TestCase):
                                    case_id="oxford_pan_45", dimensions=["aesthetic_quality", "imaging_quality"])
 
             def fake_worker(command, **kwargs):
+                if "--check" in command:
+                    report = Path(command[command.index("--check-report") + 1])
+                    quality.write_json(report, {"status": "passed", "dimensions": args.dimensions})
+                    return
                 stage = Path(command[command.index("--videos_path") + 1])
                 dimension = command[command.index("--dimension") + 1]
                 result_dir = Path(command[command.index("--output_path") + 1])
@@ -262,10 +296,10 @@ class QualityRunnerTest(unittest.TestCase):
                     patch.object(quality.shutil, "which", return_value="/bin/tool"), \
                     patch.object(quality.subprocess, "run", side_effect=fake_worker) as worker:
                 quality.run(args)
-                self.assertEqual(worker.call_count, 4)
+                self.assertEqual(worker.call_count, 5)
                 with self.assertRaises(FileExistsError):
                     quality.run(args)
-                self.assertEqual(worker.call_count, 4)
+                self.assertEqual(worker.call_count, 5)
             summary = quality.read_json(args.output / "summary.json")
             self.assertEqual(summary["completed_jobs"], 4)
             for row in summary["paired"]:
@@ -273,6 +307,20 @@ class QualityRunnerTest(unittest.TestCase):
             for path in original_paths:
                 self.assertEqual(path.read_bytes(), b"original")
                 self.assertFalse((path.parent / "split_clip").exists())
+
+    def test_failed_preflight_leaves_no_quality_output_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "inventory.json"
+            quality.write_json(source, inventory())
+            args = SimpleNamespace(inventory=source, vbench_root=root / "VBench", output=root / "quality",
+                                   case_id="oxford_pan_45", dimensions=["aesthetic_quality"])
+            with patch.object(quality, "vbench_sources", return_value={"source": "hash"}), \
+                    patch.object(quality.shutil, "which", return_value="/bin/tool"), \
+                    patch.object(quality.subprocess, "run", side_effect=quality.subprocess.CalledProcessError(1, "preflight")), \
+                    self.assertRaises(quality.subprocess.CalledProcessError):
+                quality.run(args)
+            self.assertFalse(args.output.exists())
 
 
 if __name__ == "__main__":

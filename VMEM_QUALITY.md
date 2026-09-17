@@ -5,6 +5,28 @@ tuning, or change to generation source hashes is involved. Implementation and
 CPU regression tests are authored; no tests or scoring were run on the Mac.
 Numerical quality results remain pending CECSL execution.
 
+## TorchVision Compatibility
+
+The first CECSL attempts failed before producing scores: `vmem` lacked Decord;
+after switching to `vbench`, VBench-Long could not import
+`torchvision.io.write_video`. TorchVision deprecated that PyAV-based API for
+removal in 0.24 ([official 0.23 source](https://github.com/pytorch/vision/blob/v0.23.0/torchvision/io/video.py)).
+
+The adapter now supplies a process-local PyAV video-only writer when the native
+API is absent. It uses integer-fps RGB frames, `libx264`, `yuv420p`, encoder
+defaults and packet flushing, matching the legacy settings used by VBench here.
+It does not resize, change fps, add audio, or edit installed TorchVision/VBench
+files. A working native writer is left in place. Both arms use the same selected
+writer; its name, PyAV/TorchVision versions and FFmpeg library versions are
+recorded in `evaluation_spec.json` and the evaluator logs. Bitwise equivalence
+across different encoder versions is not asserted.
+
+The runner now checks requested metric imports and a tiny CPU encode/decode
+round trip **before creating its output directory**. This is an environment
+check, not a quality measurement or a check of model-weight availability. It
+does not load scoring models. A later cold-cache model download can still fail.
+No PyTorch/TorchVision downgrade is required for this missing-API error.
+
 ## Metrics
 
 Use the six dimensions supported by the official
@@ -63,13 +85,28 @@ CUDA_VISIBLE_DEVICES="" python -m unittest discover -s tests -p 'test_vmem_quali
 ```
 
 Activate the existing **VBench-capable environment used for WorldMem/MemCam**,
-often `conda activate vbench`, and stay in `~/vmem`. Do not install VBench's
+`conda activate vbench` on CECSL, and stay in `~/vmem`. Do not install VBench's
 dependencies into the generation environment. Defaults assume `~/VBench` is the
 same checkout used for those evaluations. This environment needs working
 VBench-Long dependencies (including DreamSim, PySceneDetect and MoviePy's
 `moviepy.editor`, supplied by MoviePy 1.x), plus the `ffmpeg` and `ffprobe`
 binaries. Model downloads may occur on a cold cache. The runner does not install
 anything or modify the VBench checkout.
+
+After pulling the writer fix, check that environment explicitly without models:
+
+```bash
+CUDA_VISIBLE_DEVICES="" python -m unittest discover -s tests -p 'test_vmem*.py' -v
+CUDA_VISIBLE_DEVICES="" python scripts/run_vmem_vbench_long.py \
+  --vbench-root "$HOME/VBench" --check
+```
+
+The encoding tests require CPU PyTorch and PyAV; the native-writer parity test
+skips when the removed TorchVision API is unavailable. The `--check` command
+must pass in the real evaluation environment even if optional tests skipped.
+If it specifically reports missing PyAV, install it **only in `vbench`** with
+`python -m pip install av`, then repeat the check. Other import errors should be
+diagnosed from their tracebacks before changing packages.
 
 After tests pass, choose an available GPU with a fresh `nvidia-smi`, then:
 
@@ -78,7 +115,7 @@ CUDA_VISIBLE_DEVICES=0 python -u scripts/evaluate_vmem_quality.py run \
   --inventory outputs/vmem_transfer_v2_resident_inventory.json \
   --case-id transfer_v2_oxford_pan_45 \
   --vbench-root "$HOME/VBench" \
-  --output outputs/vmem_transfer_v2_resident_quality
+  --output outputs/vmem_transfer_v2_resident_quality_compat
 ```
 
 This runs all six dimensions on both videos, not new generation. Resource use
@@ -86,14 +123,16 @@ depends on the installed evaluators; GPU selection is not a memory reservation.
 Do not change generation/evaluation checkouts or model caches mid-evaluation.
 Existing output roots are refused to avoid mixing stale results. Failures and
 partial results remain on disk. On failure, inspect the printed `evaluate.log`
-path; do not delete evidence or silently count a missing score as zero. A retry
+path; the runner also echoes the tail of that log so the child traceback is
+visible without another command. Do not delete evidence or silently count a
+missing score as zero. A retry
 uses a new output root and does not regenerate videos.
 
 To print the current table, including any explicitly incomplete dimensions:
 
 ```bash
 python scripts/evaluate_vmem_quality.py summarize \
-  --output outputs/vmem_transfer_v2_resident_quality
+  --output outputs/vmem_transfer_v2_resident_quality_compat
 ```
 
 ## Artifacts

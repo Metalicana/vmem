@@ -18,6 +18,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -47,6 +48,19 @@ def write_json(path, value):
     temporary = path.with_name(path.name + ".tmp")
     temporary.write_text(json.dumps(value, indent=2, allow_nan=False) + "\n")
     temporary.replace(path)
+
+
+def report_failed_log(path):
+    """Surface the child traceback without reading a whole evaluation log."""
+    print(f"Evaluator log: {path} (last 80 lines, up to 16 KiB)", file=sys.stderr, flush=True)
+    try:
+        with Path(path).open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, handle.tell() - 16384))
+            tail = handle.read(16384).decode("utf-8", errors="replace")
+        print("\n".join(tail.splitlines()[-80:]) or "(log is empty)", file=sys.stderr, flush=True)
+    except OSError as exc:
+        print(f"Could not read evaluator log: {exc}", file=sys.stderr, flush=True)
 
 
 def repo_path(path):
@@ -250,6 +264,8 @@ def summarize(output, display=True):
 
 def run(args):
     inventory_path, root, output = args.inventory.resolve(), args.vbench_root.expanduser().resolve(), args.output.resolve()
+    if output.exists():
+        raise FileExistsError(f"Keep prior attempts intact; choose a new output directory: {output}")
     inventory = read_json(inventory_path)
     selected = select_pairs(inventory, args.case_id)
     sources = vbench_sources(root)
@@ -257,6 +273,15 @@ def run(args):
         raise ValueError("ffprobe and ffmpeg must be on PATH in the VBench environment")
     if len(set(args.dimensions)) != len(args.dimensions):
         raise ValueError("Duplicate dimensions")
+    with tempfile.TemporaryDirectory(prefix="vmem-quality-preflight-") as tmp:
+        report = Path(tmp) / "runtime.json"
+        print("Checking VBench imports and CPU video encoding before staging inputs...", flush=True)
+        subprocess.run([sys.executable, str(Path(__file__).with_name("run_vmem_vbench_long.py")),
+                        "--vbench-root", str(root), "--check", "--check-report", str(report),
+                        "--dimension", *args.dimensions], cwd=root, check=True)
+        runtime = read_json(report)
+        if runtime.get("status") != "passed" or runtime.get("dimensions") != args.dimensions:
+            raise ValueError("Evaluator preflight did not pass the requested dimensions")
     inputs = []
     for arm in selected:
         run_dir = repo_path(arm["run_dir"])
@@ -277,6 +302,7 @@ def run(args):
             "vbench_root": str(root), "vbench_source_sha256": sources,
             "runner_sha256": sha256(__file__), "adapter_sha256": sha256(Path(__file__).with_name("run_vmem_vbench_long.py")),
             "python": sys.version, "executable": sys.executable,
+            "evaluator_runtime": runtime,
             "packages": sorted((dist.metadata["Name"], dist.version) for dist in importlib.metadata.distributions() if dist.metadata["Name"]),
             "cache_environment": {key: os.environ.get(key) for key in ("VBENCH_CACHE_DIR", "HF_HOME", "TORCH_HOME", "XDG_CACHE_HOME", "HOME")},
             "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
@@ -330,7 +356,11 @@ def run(args):
         except Exception as exc:
             job.update(status="failed", error=str(exc))
             write_json(output / "jobs.json", jobs)
-            summarize(output)
+            report_failed_log(log)
+            try:
+                summarize(output)
+            except Exception as summary_error:
+                print(f"Partial summary unavailable: {summary_error}", file=sys.stderr, flush=True)
             raise
         write_json(output / "jobs.json", jobs)
         summarize(output, display=False)
