@@ -3,7 +3,100 @@
 This evaluates the existing, validated videos. No generation, training, GeoCov
 tuning, or change to generation source hashes is involved. Implementation and
 CPU regression tests are authored; no tests or scoring were run on the Mac.
-Numerical quality results remain pending CECSL execution.
+The user has supplied a complete six-dimension Oxford table from CECSL.
+An implementation review found experimental-control issues; see below before
+attributing these differences to the eviction rule.
+
+## 2026-09-21 Complete Table and Attribution Warning
+
+After updating PEFT from 0.7.1 to 0.10.0, the user confirmed that pretrained
+DreamSim loaded on GPU 1 and supplied the following repeat-evaluation table.
+`pip check` still flagged Decord's platform support; actual metric execution
+subsequently produced all six paired scores. Raw repeat-evaluation files have
+not been downloaded or independently checked here.
+
+| Dimension | Unbounded | GeoCov-32 | GeoCov minus unbounded |
+|---|---:|---:|---:|
+| Aesthetic quality | 0.584697 | 0.576434 | -0.008263 |
+| Imaging quality | 0.728850 | 0.716370 | -0.012481 |
+| Subject consistency | 0.958394 | 0.947820 | -0.010574 |
+| Background consistency | 0.949241 | 0.943383 | -0.005858 |
+| Motion smoothness | 0.977673 | 0.974621 | -0.003052 |
+| Dynamic degree | 1.000000 | 1.000000 | 0.000000 |
+
+These supersede the partial table for reporting this repeat attempt, not the
+historical files. Scores and differences are independently rounded. The small
+changes in the repeated first three scores also mean evaluation is not shown
+to be bitwise reproducible; their cause is not established here.
+
+The [implementation review](VMEM_IMPLEMENTATION_REVIEW.md) found that the
+generation pair already differs in geometry and retrieval before any eviction,
+and reconstruction consumes the same CPU RNG used for future diffusion noise.
+The five negative quality/consistency differences are observations for these
+two videos, not an isolated estimate of the controller's effect. Do not erase
+them or claim that fixing experimental controls is guaranteed to improve them.
+
+## 2026-09-21 Oxford Partial Results
+
+The user supplied the evaluator's partial table for
+`transfer_v2_oxford_pan_45`, output root
+`outputs/vmem_transfer_v2_resident_quality_compat2`. Six jobs completed: both
+arms for each of the following three dimensions. Values and differences below
+are copied from the printed table (each independently rounded).
+
+| Dimension | Unbounded | GeoCov-32 | GeoCov minus unbounded |
+|---|---:|---:|---:|
+| Aesthetic quality | 0.584465 | 0.576284 | -0.008180 |
+| Imaging quality | 0.728686 | 0.716447 | -0.012239 |
+| Subject consistency | 0.958416 | 0.947994 | -0.010421 |
+
+All three favor unbounded in this one scene/path/seed. These proxies support
+the user's impression of degradation on this pilot, not an aggregate transfer
+conclusion, a significance claim, or an equivalence/non-inferiority result.
+The raw result JSON and resource curves have not been inspected locally.
+
+Unbounded background consistency failed while loading DreamSim's adapter:
+`LoraConfig.__init__() got an unexpected keyword argument 'layer_replication'`.
+Neither background-consistency arm has a completed score; motion smoothness
+and dynamic degree were not reached. Missing scores are not zeros. The passed
+import/writer preflight did not exercise neural-model loading. User-reported
+tests passed with one skip, and preflight passed after installing
+`scenedetect==0.6.7.1`.
+
+This failure requires compatible PEFT config support, not removal of fields
+from the checkpoint or replacement of DreamSim by a different feature model.
+[PEFT 0.10.0](https://github.com/huggingface/peft/blob/v0.10.0/src/peft/tuners/lora/config.py)
+includes `layer_replication`. The following targeted fix is proposed for CECSL,
+not yet runtime-validated. Do not change an environment while another evaluation
+uses it. Keep the failed attempt and its recorded package versions intact:
+
+```bash
+conda activate vbench
+python -m pip install --no-deps "peft==0.10.0"
+python -m pip check
+```
+
+`--no-deps` leaves Torch, Transformers and other installed packages untouched;
+it does not prove their compatibility. Resolve any reported relevant dependency
+conflict before proceeding. On the available GPU, check actual model loading
+with the same cache used by VBench's background-consistency evaluator:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python - <<'PY'
+from pathlib import Path
+from dreamsim import dreamsim
+
+model, _ = dreamsim(pretrained=True, device="cuda", cache_dir=str(Path.home() / ".cache"))
+print("DreamSim pretrained model loaded successfully")
+PY
+```
+
+If that succeeds, rerun all six dimensions on the same saved videos in a fresh
+root, `outputs/vmem_transfer_v2_resident_quality_peft010`, using the `run` command
+below and GPU 1 if still available. This gives one complete attempt with a single
+recorded environment instead of silently merging scores across dependency
+versions. No video regeneration is required. The proposed PEFT change, model
+load and repeat evaluation have not been run on the Mac.
 
 ## TorchVision Compatibility
 

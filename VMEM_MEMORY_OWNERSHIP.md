@@ -1,5 +1,15 @@
 # VMem Memory Ownership and Measurement Audit
 
+## 2026-09-21 Quality-Drop Review
+
+The complete user-supplied Oxford quality table favors unbounded on five
+dimensions. The [implementation review](VMEM_IMPLEMENTATION_REVIEW.md) found
+pre-eviction divergence in the saved traces and a shared diffusion/reconstruction
+RNG stream, so the difference cannot yet be isolated to pruning. The downloaded
+resident traces still show legal retrieval and 32 live payloads per component
+after the budget binds. No generation code or scoring coefficients were changed
+by that review; a read-only pairing diagnostic and unrun CPU tests were added.
+
 ## 2026-09-17 Resident Storage Validation
 
 New `--frame-storage resident` releases evicted RGB, latent, embedding,

@@ -1,5 +1,36 @@
 # VMem External Transfer: Audit and MemCam Handoff
 
+## 2026-09-21 Implementation Review
+
+A subsequent complete user-supplied VBench-Long table has five lower
+quality/consistency scores for GeoCov-32 and tied dynamic degree. However,
+inspection of the downloaded generation records shows geometry divergence
+after the first action and different retrieval at step 5, before the first
+eviction at step 7. Static code review also confirms that reconstruction
+advances the CPU RNG used by subsequent diffusion calls, with policy-dependent
+draw counts after the budget binds. Neither finding establishes the cause or
+direction of the metric differences. See [the implementation review and
+read-only pairing diagnostic](VMEM_IMPLEMENTATION_REVIEW.md). The controller's
+arithmetic and low-score eviction direction match the sibling implementations;
+no invalid frame access or broken resident release was found. Production
+generation code, policies and frozen manifests remain unchanged. Diagnose
+these controls before running the remaining suite or making a causal claim.
+
+## 2026-09-21 Partial Quality Evidence
+
+The user supplied three completed VBench-Long metric pairs for the validated
+resident-v2 Oxford `pan_45` pilot. GeoCov-32 scores below unbounded on aesthetic
+quality (0.576284 vs 0.584465), imaging quality (0.716447 vs 0.728686), and subject
+consistency (0.947994 vs 0.958416). This one scene/path/seed does not establish a
+general quality improvement or preservation claim. Background consistency
+failed during DreamSim/PEFT adapter loading; motion smoothness and dynamic
+degree were not reached. Completed scores and the failure remain in
+`outputs/vmem_transfer_v2_resident_quality_compat2`. See
+[the partial results and environment fix](VMEM_QUALITY.md).
+The full metric table and resident-v2 resource interpretation are still pending;
+do not reinterpret the missing metrics as zeros or tune GeoCov to rescue this
+pilot. No generation or evaluation was run on the Mac.
+
 ## 2026-09-17 Resident Memory Follow-Up
 
 The user supplied a validated Oxford v1 pair: both 781-frame, 576x576, 13-fps
