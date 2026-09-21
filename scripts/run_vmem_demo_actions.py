@@ -275,6 +275,7 @@ def _generation_provenance(image_path: Path, config_path: Path) -> dict:
         "modeling/resource_audit.py", "scripts/vmem_protocol.py",
         "scripts/vmem_recovery.py",
         "frame_storage.py",
+        "generation_debug.py", "modeling/modules/autoencoder.py", "modeling/modules/conditioner.py",
     )
     try:
         commit = subprocess.check_output(
@@ -370,6 +371,8 @@ def main() -> None:
         help="Interpolated frames per action. The Gradio demo uses 4.",
     )
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--generation-debug", choices=("observe", "isolated"),
+                        help="Short fresh-run fingerprints; isolated additionally uses phase/action RNG. Requires --checkpoint-every 0.")
     parser.add_argument(
         "--memory-policy",
         choices=MEMORY_POLICIES,
@@ -411,6 +414,9 @@ def main() -> None:
         )
     if args.num_actions <= 0:
         raise ValueError("--num-actions must be positive")
+    if args.generation_debug is not None:
+        from generation_debug import validate_debug_args
+        validate_debug_args(args)
     if args.profile_warmup_steps < 0:
         raise ValueError("--profile-warmup-steps must be nonnegative")
     if args.frames_per_action <= 0:
@@ -512,7 +518,15 @@ def main() -> None:
     if device.type == "cuda":
         torch.cuda.synchronize(device)
     started_at = time.perf_counter()
-    pipeline = VMemPipeline(config, device)
+    debug = None
+    if args.generation_debug is not None:
+        from generation_debug import GenerationDebug
+        debug = GenerationDebug(run_dir / "generation_debug.jsonl", seed=args.seed,
+                                mode=args.generation_debug, device=device, torch_module=torch)
+        atomic_json(run_dir / "generation_environment.json", debug.environment())
+    with debug.phase("model_load", -1) if debug is not None else nullcontext():
+        pipeline = VMemPipeline(config, device)
+    pipeline.generation_debug = debug
     runtime["pipeline"] = pipeline
     if device.type == "cuda":
         torch.cuda.synchronize(device)
@@ -584,7 +598,13 @@ def main() -> None:
         torch.cuda.synchronize(device)
     initialization_started = time.perf_counter()
     if args.resume_from is None:
-        navigator.initialize(initial_image, initial_pose, initial_K)
+        with debug.phase("initialization", -1) if debug is not None else nullcontext():
+            if debug is not None:
+                debug.record("initial_input", -1, image=initial_image, pose=initial_pose, K=initial_K)
+            navigator.initialize(initial_image, initial_pose, initial_K)
+            if debug is not None:
+                debug.record("initial_encoding", -1, latents=pipeline.latents,
+                             embeddings=pipeline.encoder_embeddings, poses=pipeline.c2ws, Ks=pipeline.Ks)
     if device.type == "cuda":
         torch.cuda.synchronize(device)
     initialization_seconds = time.perf_counter() - initialization_started
@@ -684,6 +704,7 @@ def main() -> None:
         "image": args.image,
         "run_id": args.run_id,
         "seed": args.seed,
+        "generation_debug": args.generation_debug,
         "provenance": provenance,
         "model_load_seconds": model_load_seconds,
         "initialization_seconds": initialization_seconds,

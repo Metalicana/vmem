@@ -3,12 +3,17 @@
 2026-09-21. Static review of HEAD `8ab465b` and the downloaded resident-v2
 Oxford records in `~/Downloads/vmem_oxford_v2_review/outputs`. Generation was
 recorded at `e92dc0479dba896cf12548605fcab38d79fe4c46`; the inspected generation,
-storage and CUT3R files have no diff against that commit in this workspace.
+storage and CUT3R files had no diff against that commit at the initial audit.
 No tests, inference, neural metrics, video decoding or new experiment was run
 on the Mac. Existing JSON records were read with `jq`. The user subsequently
-ran the original 10 pairing-audit tests on CECSL; all passed, and the saved-run
-audit output is incorporated below. The new optional pixel comparison and its
-11 additional tests are authored but not yet executed; the Mac remains code-only.
+ran all 21 pairing/pixel-audit tests on CECSL; all passed. The pixel check
+confirmed that generated frame 1 differs: MAE 0.169186, RMSE 0.447214, maximum
+26 channel levels out of 255; changed-pixel fraction 0.337556. This is a small
+average difference, not just PNG metadata, with an unresolved cause. See the
+[short generation diagnostic](VMEM_GENERATION_DEBUG.md) for newly added opt-in
+noise/conditioning fingerprints and phase/action RNG isolation. Those hooks
+and their tests remain unexecuted; default RNG behavior is unchanged, but
+source hashes have changed. No old experiment lock or result was overwritten.
 
 ## Findings
 
@@ -60,12 +65,14 @@ same, and the GeoCov scoring path does not itself use RNG or modify images.
 The subsequent user-run audit locates the first recorded PNG hash difference
 at frame 1, the first generated frame. It compares 33 pre-eviction records
 (frames 0-32 inclusive); it does not rehash PNG files or decode pixels. PNG
-encoding differences can change a hash without changing RGB, so pixel-level
-divergence and its magnitude still need the optional check below.
+encoding differences can change a hash without changing RGB. The user's
+subsequent decoded-pixel check ruled out that explanation for frame 1 and
+measured the small differences reported above; all 33 compared PNG pairs were
+verified against their saved hashes.
 
 The step-8 RNG mismatch above cannot explain the earlier step-0 geometry
-difference. If frame 1 differs in decoded RGB, neither eviction nor the first
-reconstruction can explain that earliest difference: generation produces the
+difference. Neither eviction nor the first reconstruction can explain the
+confirmed first-frame pixel difference: generation produces the
 PIL images before reconstruction, although durable output is written afterward.
 Possible causes include numerical nondeterminism, unrecorded RNG consumption
 or initialization, and unrecorded dependency differences; none is established
@@ -174,8 +181,9 @@ it does not explain the separately observed geometry divergence. A tiny RGB
 error is different from a visibly different first sample; neither alone proves
 its mechanism. The file records all per-frame errors for later inspection.
 
-Then implement and validate independently controlled RNG and stronger provenance
-before another matched generation pair. The first GPU diagnostic should be a
+Opt-in observation and isolated phase/action RNG are now implemented but need
+CPU/GPU validation; see [the short-run protocol](VMEM_GENERATION_DEBUG.md).
+The first GPU diagnostic should be a
 short no-eviction control (budget above the entire short rollout), with repeated
 same-policy control if needed to measure numerical variability. Compare input,
 latent/noise, output and geometry fingerprints per action. Only after that gate
@@ -190,5 +198,7 @@ user's supplied full metric table, and those observations must stay in the
 record. They do not yet isolate the controller's effect. There is a confirmed
 shared-RNG control problem, observed pre-eviction divergence of unresolved
 origin, and known descriptor/reconstruction adaptations. No evidence currently
-proves that correcting these will reverse the result. Generation, retrieval,
-scoring rules and manifests were deliberately left unchanged during this review.
+proves that correcting these will reverse the result. The initial review left
+generation unchanged. Follow-up opt-in diagnostic hooks leave default RNG,
+retrieval, scoring rules and manifests unchanged; isolated debug runs use a
+different, explicitly named RNG protocol, not the frozen benchmark protocol.

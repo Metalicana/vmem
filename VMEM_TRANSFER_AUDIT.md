@@ -16,12 +16,15 @@ no invalid frame access or broken resident release was found. Production
 generation code, policies and frozen manifests remain unchanged. Diagnose
 these controls before running the remaining suite or making a causal claim.
 
-Follow-up CECSL audit: all 10 original diagnostic tests passed. Frame 0's
-recorded PNG hash agrees; frame 1's differs, before the first eviction after
-frame 32. Decoded-pixel comparison is pending, using the new optional
-`--compare-pixels` check. The shared post-eviction RNG issue cannot explain
-this earlier encoded-output divergence. No new generation is needed for
-the pixel check, and no controller improvement is implied by this finding.
+Follow-up CECSL audit: all 21 pairing/pixel tests passed. The hash-verified
+pixel comparison confirms a small real difference at frame 1 (MAE 0.169186,
+RMSE 0.447214 in 0-255 channel units), before the first eviction after frame 32.
+The shared post-eviction RNG issue cannot explain this earlier divergence.
+Opt-in [short generation diagnostics](VMEM_GENERATION_DEBUG.md) now record
+conditioning/noise and offer isolated phase/action RNG; their tests and GPU
+behavior remain unvalidated. Default behavior and scoring are unchanged, but
+source hashes have changed. Preserve the old lock/results. No controller
+improvement is implied by the diagnostic or by passing CPU tests.
 
 ## 2026-09-21 Partial Quality Evidence
 

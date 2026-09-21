@@ -388,11 +388,15 @@ class EulerEDMSampler(object):
         cond: dict,
         uc: dict,
         gamma: float = 0.0,
+        debug_noise=None,
+        debug_index=None,
         **guider_kwargs,
     ) -> torch.Tensor:
         sigma_hat = sigma * (gamma + 1.0) + 1e-6
 
         eps = torch.randn_like(x) * self.s_noise
+        if debug_noise is not None:
+            debug_noise(debug_index, eps)
         x = x + eps * append_dims(sigma_hat**2 - sigma**2, x.ndim) ** 0.5
 
         denoised = denoiser(*self.guider.prepare_inputs(x, sigma_hat, cond, uc))
@@ -410,6 +414,7 @@ class EulerEDMSampler(object):
         uc: Union[dict, None] = None,
         num_steps: Union[int, None] = None,
         verbose: bool = True,
+        debug_noise=None,
         **guider_kwargs,
     ) -> torch.Tensor:
         uc = cond if uc is None else uc
@@ -434,6 +439,8 @@ class EulerEDMSampler(object):
                 cond,
                 uc,
                 gamma,
+                debug_noise=debug_noise,
+                debug_index=i,
                 **guider_kwargs,
             )
         return x

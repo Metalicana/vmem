@@ -1,0 +1,117 @@
+# Short VMem Reproducibility Diagnostic
+
+The user verified all 21 pairing-audit tests on CECSL and compared actual saved
+PNG pixels through frame 32. Frame 1 first differs: mean absolute channel error
+0.169186, RMSE 0.447214, maximum 26 on a 0-255 scale; 33.7556% of pixels have at
+least one changed channel. This is a small average difference with larger local
+outliers, not proof of a different noise sample, a specific nondeterministic
+kernel, or a GeoCov defect. Eviction only happens after frame 32. The later
+negative VBench results remain recorded.
+
+## Implementation
+
+The runner accepts optional `--generation-debug observe|isolated`:
+
+- `observe` records values without reseeding or restoring RNG. Run this first
+  to inspect the existing stochastic behavior.
+- `isolated` seeds Python, NumPy, Torch CPU and the selected Torch CUDA device
+  independently for model loading, initialization, diffusion and reconstruction.
+  Seeds derive from SHA-256 of a version tag, base seed, phase and global step,
+  excluding policy, budget, output directory and job order. Phase exit restores
+  outer RNG states, including on errors. Reconstruction draw counts therefore
+  cannot advance the next diffusion step's noise stream. Both initial CPU
+  diffusion noise and the sampler's CUDA noise are inside the phase scope.
+
+Neither mode changes scoring, retrieval, reconstruction input selection, steps,
+weights or precision settings. Isolated mode deliberately changes random draws;
+it is not a byte-compatible rerun of the old protocol. RNG isolation does not
+make all CUDA operations deterministic. See the official
+[PyTorch 2.7 reproducibility notes](https://docs.pytorch.org/docs/2.7/notes/randomness.html)
+and [RNG fork behavior](https://docs.pytorch.org/docs/2.7/random.html).
+
+`generation_debug.jsonl` records phase-start/end CPU/CUDA RNG fingerprints,
+initial input/latent/CLIP fingerprints, diffusion conditioning, actual initial
+noise, every sampler noise tensor, final latents and decoded samples. Hashing
+preserves values, dtype and shape, but CUDA-to-CPU copies force synchronization:
+debug resource timings are NOT benchmark timings. Environment JSON records
+package versions, Torch build, selected GPU, backend precision/determinism
+flags and relevant environment variables. Existing run specs retain input,
+config, source and recorded VMem/CUT3R checkpoint hashes. This is not an
+exhaustive hash of dependencies or VAE/CLIP weights.
+
+Default runs do not construct a diagnostic or change RNG behavior. Debug runs
+must be fresh, unlocked, 1-12 actions, four frames per action, with
+`--checkpoint-every 0`. Resume is deliberately unsupported for these short
+diagnostics. New source hashes will not match the old experiment lock: do not
+overwrite it to bypass the check. No transfer manifest or completed artifact
+has been modified.
+
+## CECSL Validation
+
+No tests, dry runs or GPU jobs were executed on the Mac. Ask the user to run:
+
+```bash
+conda activate vmem
+CUDA_VISIBLE_DEVICES="" python -m unittest discover -s tests -v
+```
+
+New CPU tests cover RNG restoration, different reconstruction draw counts,
+observation parity, real sampler callback parity, fingerprints, short-run
+guards and diagnostic completeness. They do not certify neural GPU parity.
+After CPU tests pass, choose a currently free GPU using `nvidia-smi`. Use the
+generation environment, not VBench, for this predefined **three-run, two-action**
+diagnostic. Two identical unbounded runs measure repeat variation; the third
+uses GeoCov-32. All end at nine frames, so none can evict a frame.
+
+```bash
+GPU=1
+ROOT=outputs/vmem_debug_observe_v1
+for CASE in unbounded_a unbounded_b geocov32; do
+  POLICY=(--memory-policy unbounded)
+  if [ "$CASE" = geocov32 ]; then
+    POLICY=(--memory-policy slam_covisibility --memory-budget 32)
+  fi
+  CUDA_VISIBLE_DEVICES="$GPU" python -u scripts/run_vmem_demo_actions.py \
+    --image test_samples/oxford.jpg --run-id "debug_${CASE}" \
+    --output-root "$ROOT" --trajectory pan_45 --num-actions 2 \
+    --fps 13 --frames-per-action 4 --step-size 0.1 --seed 501 \
+    --frame-storage resident --memory-scope surfel_indexed_view_memory \
+    --inference-steps 50 --surfel-niter 400 --checkpoint-every 0 \
+    --generation-debug observe "${POLICY[@]}" || break
+done
+```
+
+This bash loop runs one process at a time; it does not reserve GPU memory or
+promise an OOM-free shared GPU. Preserve each printed run directory. Set `A`,
+`B`, `C` to the exact paths of the three attempts, respectively:
+
+```bash
+python scripts/audit_vmem_generation_debug.py --left "$A" --right "$B"
+python scripts/audit_vmem_generation_debug.py --left "$A" --right "$C"
+python scripts/audit_vmem_pairing.py --unbounded "$A" --bounded "$C" --compare-pixels
+```
+
+The debug comparer accepts same-policy repeats and requires completed status
+and full phase/noise records; missing data is not equality. Preserve raw traces
+and check reported settings/provenance/environment differences.
+
+## Interpretation
+
+- Different initial encoding with the same saved input points to encoding or
+  upstream runtime differences, not eviction.
+- Different initial/sampler noise demonstrates different stochastic inputs.
+  Phase RNG records help locate when streams separated.
+- Matching conditioning/noise but different latents narrows investigation to
+  denoising/model/runtime behavior. Matching latents but different decoded
+  samples narrows it to decoding. Neither identifies a specific kernel cause.
+- If the unbounded repeat also differs, pre-eviction hash mismatch alone is
+  not evidence of a GeoCov-specific bug. Compare magnitude and growth, not
+  just equality. A matching short prefix does not validate 60-second behavior.
+
+Review observe results first. A separately named `isolated` repeat of the same
+triplet can then test matched stochastic inputs; use a new output root. After
+the no-eviction gate, a predefined short B=32 pair can cross the eviction
+boundary. No remaining-suite launch or scoring-rule tuning follows from this
+diagnostic. Promoting the RNG change to the benchmark requires a new version,
+lock, both arms and recovery validation; this debug implementation does not
+perform that migration.

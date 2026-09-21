@@ -8,11 +8,15 @@ pre-eviction divergence in the saved traces and a shared diffusion/reconstructio
 RNG stream, so the difference cannot yet be isolated to pruning. The downloaded
 resident traces still show legal retrieval and 32 live payloads per component
 after the budget binds. No generation code or scoring coefficients were changed
-by that review. The user reports all 10 pairing-audit CPU tests passed on CECSL.
-Its run report finds the first saved PNG hash difference at generated frame 1,
-before any eviction or reconstruction could affect generation. Encoded hashes
-alone do not prove differing pixels. An optional CPU-only saved-PNG comparison
-and 11 additional tests have been added; both are pending CECSL execution.
+by that initial review. The user now reports all 21 pairing/pixel-audit tests
+passed on CECSL. Hash-verified decoded PNGs confirm a small real difference at
+generated frame 1 (MAE 0.169186 and RMSE 0.447214 on the 0-255 channel scale),
+before eviction or reconstruction could affect generation. Its cause and later
+quality impact remain unresolved. Newly added opt-in
+[generation diagnostics](VMEM_GENERATION_DEBUG.md) record conditioning/noise
+and support isolated phase/action RNG for short runs; these new hooks/tests
+remain pending CECSL validation. They do not change the old videos or GeoCov
+scores. Default RNG behavior is unchanged; source hashes are new.
 
 ## 2026-09-17 Resident Storage Validation
 

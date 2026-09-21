@@ -1,4 +1,5 @@
 import os
+from contextlib import nullcontext
 from typing import List, Union
 from copy import deepcopy
 import json
@@ -1867,6 +1868,8 @@ class VMemPipeline:
                                          verbose=True, 
                                          global_pbar=None, 
                                          return_latents=True,
+                                         generation_debug=getattr(self, "generation_debug", None),
+                                         debug_step=self.global_step,
                                          device=self.device)
 
             # Process and store generated frames
@@ -1916,12 +1919,16 @@ class VMemPipeline:
             if profiler is not None:
                 profiler.reconstruction_input_indices = list(reconstruction_time_indices)
 
-            self.construct_and_store_scene(reconstruction_frames, 
-                                        time_indices=context_time_indices,
-                                        input_time_indices=reconstruction_time_indices,
-                                        niter=self.config.surfel.niter, 
-                                        lr=self.config.surfel.lr, 
-                                        device=self.device)
+            debug = getattr(self, "generation_debug", None)
+            with debug.phase("reconstruction", self.global_step) if debug is not None else nullcontext():
+                self.construct_and_store_scene(
+                    reconstruction_frames,
+                    time_indices=context_time_indices,
+                    input_time_indices=reconstruction_time_indices,
+                    niter=self.config.surfel.niter,
+                    lr=self.config.surfel.lr,
+                    device=self.device,
+                )
             if profiler is not None:
                 profiler.capture_before_update(self)
             if new_memory_indices:

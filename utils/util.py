@@ -1,4 +1,5 @@
 from typing import Callable, Dict, List, Optional, Union
+from contextlib import nullcontext
 
 import numpy as np
 import PIL.Image
@@ -691,11 +692,19 @@ def do_sample(
     global_pbar=None,
     return_latents=False,
     device: str = "cuda",
+    generation_debug=None,
+    debug_step=None,
     **_,
 ):
 
     num_samples = [1, T]
-    with torch.inference_mode(), torch.autocast("cuda"):
+    with torch.inference_mode(), torch.autocast("cuda"), (
+        generation_debug.phase("diffusion", debug_step) if generation_debug is not None else nullcontext()
+    ):
+
+        if generation_debug is not None:
+            generation_debug.record("conditioning", debug_step, c=c, uc=uc, c2w=c2w, K=K,
+                                    mask=cond_frames_mask)
 
         additional_model_inputs = {"num_frames": T}
         additional_sampler_inputs = {
@@ -705,9 +714,14 @@ def do_sample(
         }
         if global_pbar is not None:
             additional_sampler_inputs["global_pbar"] = global_pbar
+        if generation_debug is not None:
+            additional_sampler_inputs["debug_noise"] = lambda index, noise: generation_debug.record(
+                "sampler_noise", debug_step, sampler_step=index, noise=noise)
 
         shape = (math.prod(num_samples), C, H // F, W // F)
         randn = torch.randn(shape).to(device)
+        if generation_debug is not None:
+            generation_debug.record("initial_noise", debug_step, noise=randn)
 
         samples_z = sampler(
             lambda input, sigma, c: denoiser(
@@ -727,7 +741,11 @@ def do_sample(
         if samples_z is None:
             return
 
+        if generation_debug is not None:
+            generation_debug.record("diffusion_latents", debug_step, latents=samples_z)
         samples = ae.decode(samples_z, decoding_t)
+        if generation_debug is not None:
+            generation_debug.record("decoded_samples", debug_step, samples=samples)
     if return_latents:
         return samples, samples_z
     
