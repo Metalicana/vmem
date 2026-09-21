@@ -1,9 +1,16 @@
+import hashlib
 import json
 from pathlib import Path
 import tempfile
 import unittest
 
 from scripts.audit_vmem_pairing import compare_runs
+
+try:
+    import numpy as np
+    from PIL import Image, PngImagePlugin
+except ImportError:
+    np = Image = PngImagePlugin = None
 
 
 def write_json(path, value):
@@ -133,6 +140,107 @@ class PairingAuditTest(unittest.TestCase):
     def test_does_not_modify_run_records(self):
         before = {str(path): path.read_bytes() for path in Path(self.tmp.name).rglob("*") if path.is_file()}
         compare_runs(self.left, self.right)
+        after = {str(path): path.read_bytes() for path in Path(self.tmp.name).rglob("*") if path.is_file()}
+        self.assertEqual(before, after)
+
+
+@unittest.skipIf(Image is None, "Pixel checks require Pillow and NumPy")
+class PixelPairingAuditTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.left, self.right = fixture(Path(self.tmp.name))
+        for path in (self.left, self.right):
+            (path / "generated_frames").mkdir()
+            for index in range(13):
+                self.write_frame(path, index)
+
+    def write_frame(self, path, index, *, pixel=None, metadata=None, size=(3, 2), mode="RGB"):
+        frame = path / "generated_frames" / f"{index:04d}.png"
+        with Image.new(mode, size) as image:
+            if pixel is not None:
+                image.putpixel((0, 0), pixel)
+            image.save(frame, pnginfo=metadata)
+        manifest = path / "frame_manifest.json"
+        data = json.loads(manifest.read_text())
+        data["sha256"][index] = hashlib.sha256(frame.read_bytes()).hexdigest()
+        write_json(manifest, data)
+
+    def report(self):
+        return compare_runs(self.left, self.right, compare_pixels=True)
+
+    def test_metadata_only_png_difference_is_not_a_pixel_difference(self):
+        metadata = PngImagePlugin.PngInfo()
+        metadata.add_text("test", "Different PNG metadata, identical RGB")
+        self.write_frame(self.right, 1, metadata=metadata)
+        report = self.report()
+        self.assertIn("saved_frame_hashes", report["pre_eviction_divergences"])
+        self.assertNotIn("saved_frame_pixels", report["pre_eviction_divergences"])
+        self.assertTrue(report["saved_frame_pixels"]["prefix_pixels_equal"])
+        self.assertIsNone(report["saved_frame_pixels"]["first_difference"])
+        self.assertFalse(report["saved_frame_pixels"]["frames"][1]["encoded_bytes_equal"])
+
+    def test_first_generated_pixel_difference_and_error_units(self):
+        self.write_frame(self.right, 1, pixel=(255, 0, 0))
+        report = self.report()
+        self.assertIn("saved_frame_pixels", report["pre_eviction_divergences"])
+        pixels = report["saved_frame_pixels"]
+        self.assertTrue(pixels["file_hashes_verified"])
+        self.assertEqual(pixels["frames_compared"], 9)
+        row = pixels["first_difference"]
+        self.assertEqual(row["index"], 1)
+        self.assertEqual(row["max_abs_channel_error_8bit"], 255)
+        self.assertAlmostEqual(row["mean_abs_channel_error_8bit"], 255 / 18)
+        self.assertAlmostEqual(row["rmse_channel_error_8bit"], 255 / (18 ** 0.5))
+        self.assertAlmostEqual(row["changed_pixel_fraction"], 1 / 6)
+
+    def test_frames_generated_by_first_evicting_action_are_compared(self):
+        self.write_frame(self.right, 8, pixel=(1, 0, 0))
+        self.assertEqual(self.report()["saved_frame_pixels"]["first_difference"]["index"], 8)
+
+    def test_post_eviction_frames_are_not_decoded(self):
+        (self.right / "generated_frames" / "0009.png").unlink()
+        pixels = self.report()["saved_frame_pixels"]
+        self.assertEqual(pixels["frames_compared"], 9)
+        self.assertTrue(pixels["prefix_pixels_equal"])
+
+    def test_no_evictions_compares_entire_run(self):
+        for filename in ("retrieval_trace.json", "memory_trace.json", "resource_trace.jsonl"):
+            (self.right / filename).write_text((self.left / filename).read_text())
+        self.write_frame(self.right, 12, pixel=(1, 0, 0))
+        pixels = self.report()["saved_frame_pixels"]
+        self.assertEqual(pixels["frames_compared"], 13)
+        self.assertEqual(pixels["first_difference"]["index"], 12)
+
+    def test_changed_file_with_stale_hash_is_rejected(self):
+        frame = self.right / "generated_frames" / "0001.png"
+        frame.write_bytes(frame.read_bytes() + b"changed")
+        with self.assertRaisesRegex(ValueError, "hash mismatch"):
+            self.report()
+
+    def test_missing_frame_is_not_a_success(self):
+        (self.right / "generated_frames" / "0001.png").unlink()
+        with self.assertRaises(FileNotFoundError):
+            self.report()
+
+    def test_size_mismatch_does_not_resize(self):
+        self.write_frame(self.right, 1, size=(4, 2))
+        with self.assertRaisesRegex(ValueError, "shape mismatch"):
+            self.report()
+
+    def test_non_rgb_is_not_silently_converted(self):
+        self.write_frame(self.right, 1, mode="RGBA")
+        with self.assertRaisesRegex(ValueError, "Expected an RGB PNG"):
+            self.report()
+
+    def test_missing_manifest_is_not_a_verified_pixel_comparison(self):
+        (self.right / "frame_manifest.json").unlink()
+        with self.assertRaisesRegex(ValueError, "requires both frame_manifest"):
+            self.report()
+
+    def test_pixel_comparison_preserves_all_files(self):
+        before = {str(path): path.read_bytes() for path in Path(self.tmp.name).rglob("*") if path.is_file()}
+        self.report()
         after = {str(path): path.read_bytes() for path in Path(self.tmp.name).rglob("*") if path.is_file()}
         self.assertEqual(before, after)
 

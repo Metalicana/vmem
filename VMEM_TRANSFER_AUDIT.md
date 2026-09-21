@@ -16,6 +16,13 @@ no invalid frame access or broken resident release was found. Production
 generation code, policies and frozen manifests remain unchanged. Diagnose
 these controls before running the remaining suite or making a causal claim.
 
+Follow-up CECSL audit: all 10 original diagnostic tests passed. Frame 0's
+recorded PNG hash agrees; frame 1's differs, before the first eviction after
+frame 32. Decoded-pixel comparison is pending, using the new optional
+`--compare-pixels` check. The shared post-eviction RNG issue cannot explain
+this earlier encoded-output divergence. No new generation is needed for
+the pixel check, and no controller improvement is implied by this finding.
+
 ## 2026-09-21 Partial Quality Evidence
 
 The user supplied three completed VBench-Long metric pairs for the validated
