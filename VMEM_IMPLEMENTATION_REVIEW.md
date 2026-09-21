@@ -11,8 +11,17 @@ confirmed that generated frame 1 differs: MAE 0.169186, RMSE 0.447214, maximum
 26 channel levels out of 255; changed-pixel fraction 0.337556. This is a small
 average difference, not just PNG metadata, with an unresolved cause. See the
 [short generation diagnostic](VMEM_GENERATION_DEBUG.md) for newly added opt-in
-noise/conditioning fingerprints and phase/action RNG isolation. Those hooks
-and their tests remain unexecuted; default RNG behavior is unchanged, but
+noise/conditioning fingerprints and phase/action RNG isolation. The subsequent
+user-run full CECSL suite reported 122 tests: 119 passed, including all new
+diagnostic tests, and three VBench writer tests skipped. User-supplied logs now
+show all three two-action `observe` GPU runs reaching export. Even the two
+unbounded repeats differ in first-action merge counts. User-run fingerprint
+comparisons now locate the earliest mismatch in initial CLIP embeddings in
+both pairs. Recorded input/VAE latents, RNG states and diffusion/sampler noise
+match, as do listed provenance/environment fields. See the new, untested
+[encoder-only probe](VMEM_CLIP_PROBE.md). Isolated-mode GPU validation remains
+pending; default RNG
+behavior is unchanged, but
 source hashes have changed. No old experiment lock or result was overwritten.
 
 ## Findings
@@ -78,8 +87,11 @@ Possible causes include numerical nondeterminism, unrecorded RNG consumption
 or initialization, and unrecorded dependency differences; none is established
 by these traces. Initial VAE encoding uses the posterior mean, not a random
 posterior sample. The first diffusion call's RNG state and conditioning
-fingerprints were not recorded, so the existing traces cannot establish their
-equality retrospectively.
+fingerprints were not recorded for the old 60-second pair, so its traces cannot
+establish their equality retrospectively. The new short diagnostics do record
+them and show matching noise, with the first difference in CLIP embeddings even
+between two unbounded repeats. These short-run results cannot by themselves
+explain the long-run quality gap or prove eviction harmless.
 
 The current inventory validates format, provenance fields, legal bank access
 and physical payload release, not equality of the pre-eviction prefix. Its

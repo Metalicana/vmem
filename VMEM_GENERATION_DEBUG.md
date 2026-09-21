@@ -48,7 +48,34 @@ has been modified.
 
 ## CECSL Validation
 
-No tests, dry runs or GPU jobs were executed on the Mac. Ask the user to run:
+The user subsequently supplied completion/export logs for all three `observe`
+runs on GPU 1, each completing both actions. Their directories under
+`outputs/vmem_debug_observe_v1` are:
+
+- A: `debug_unbounded_a_pan_45_A2_unbounded_20260921_140657`
+- B: `debug_unbounded_b_pan_45_A2_unbounded_20260921_140807`
+- C: `debug_geocov32_pan_45_A2_slam_covisibility_B32_20260921_140909`
+
+First-action merge-count sequences already differ between the unbounded
+repeats: A `[207,150,260,277]`, B `[189,160,233,271]`; C reports
+`[208,153,259,274]`. This is observed variation in reconstruction/merge output
+without a policy change, not proof of its origin or that GeoCov has no effect
+after eviction. Subsequent user-run fingerprint comparisons find the same
+earliest difference in A/B and A/C: `initial_encoding.embeddings`, step -1.
+The recorded input, VAE latent, RNG states and all diffusion/sampler noise match;
+conditioning and generated values subsequently differ. Listed provenance and
+environments match. This identifies the initial image-encoder path, not a
+policy-specific eviction defect. The nine-frame pixel comparison and isolated
+GPU mode remain unreported. See [the encoder-only probe](VMEM_CLIP_PROBE.md);
+no additional video generation is requested at this stage.
+
+The user ran the full suite in the CECSL `vmem` environment on 2026-09-21:
+122 tests reported, 119 passed, three VBench video-writer encoding tests skipped
+for missing optional dependencies in that environment. All generation-debug
+tests passed, including CPU sampler observation parity and RNG isolation.
+The printed 0.6/0.5 quality table and PID 123 were mocked test output, not new
+evaluation results or a launched generation job. No tests, dry runs or GPU jobs
+were executed on the Mac. The command used was:
 
 ```bash
 conda activate vmem
@@ -58,7 +85,7 @@ CUDA_VISIBLE_DEVICES="" python -m unittest discover -s tests -v
 New CPU tests cover RNG restoration, different reconstruction draw counts,
 observation parity, real sampler callback parity, fingerprints, short-run
 guards and diagnostic completeness. They do not certify neural GPU parity.
-After CPU tests pass, choose a currently free GPU using `nvidia-smi`. Use the
+The CPU gate has passed; choose a currently free GPU using `nvidia-smi`. Use the
 generation environment, not VBench, for this predefined **three-run, two-action**
 diagnostic. Two identical unbounded runs measure repeat variation; the third
 uses GeoCov-32. All end at nine frames, so none can evict a frame.

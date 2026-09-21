@@ -14,8 +14,17 @@ generated frame 1 (MAE 0.169186 and RMSE 0.447214 on the 0-255 channel scale),
 before eviction or reconstruction could affect generation. Its cause and later
 quality impact remain unresolved. Newly added opt-in
 [generation diagnostics](VMEM_GENERATION_DEBUG.md) record conditioning/noise
-and support isolated phase/action RNG for short runs; these new hooks/tests
-remain pending CECSL validation. They do not change the old videos or GeoCov
+and support isolated phase/action RNG for short runs. The subsequent full
+CECSL suite reported 122 tests: 119 passed and three VBench writer tests skipped;
+all generation-debug CPU tests passed. User-supplied logs now show both
+unbounded `observe` repeats and GeoCov-32 completing two GPU actions and export.
+Both user-run fingerprint comparisons (unbounded repeat and unbounded/GeoCov)
+first differ in the initial CLIP embeddings. Input, initial VAE latent, recorded
+RNG states and initial/sampler noise match. This localizes the earliest
+discrepancy to image encoding, not eviction; the cause and later quality impact
+remain unresolved. A standalone [CLIP probe](VMEM_CLIP_PROBE.md) is now available
+but untested. Isolated-mode GPU behavior is not yet validated.
+These changes do not change the old videos or GeoCov
 scores. Default RNG behavior is unchanged; source hashes are new.
 
 ## 2026-09-17 Resident Storage Validation

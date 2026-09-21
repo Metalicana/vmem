@@ -21,8 +21,18 @@ pixel comparison confirms a small real difference at frame 1 (MAE 0.169186,
 RMSE 0.447214 in 0-255 channel units), before the first eviction after frame 32.
 The shared post-eviction RNG issue cannot explain this earlier divergence.
 Opt-in [short generation diagnostics](VMEM_GENERATION_DEBUG.md) now record
-conditioning/noise and offer isolated phase/action RNG; their tests and GPU
-behavior remain unvalidated. Default behavior and scoring are unchanged, but
+conditioning/noise and offer isolated phase/action RNG. The subsequent full
+CECSL suite reported 119 passed and three skipped out of 122 tests, including
+passing generation-debug CPU tests. The user subsequently supplied completion
+logs for all three two-action `observe` GPU runs. The two unbounded repeats
+already differ in first-action merge counts. Subsequent fingerprint comparisons
+identify initial CLIP embeddings as the first mismatch in both the unbounded
+repeat and the unbounded/GeoCov pair, with matching recorded input/VAE latent,
+RNG states and diffusion noise. An untested [encoder-only probe](VMEM_CLIP_PROBE.md)
+now separates preprocessing, loaded weights and attention-dispatch repeatability.
+The numerical cause and long-run quality impact remain unresolved; isolated-mode
+GPU validation also remains pending.
+Default behavior and scoring are unchanged, but
 source hashes have changed. Preserve the old lock/results. No controller
 improvement is implied by the diagnostic or by passing CPU tests.
 
