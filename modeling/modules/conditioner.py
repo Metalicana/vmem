@@ -3,13 +3,18 @@ import open_clip
 import torch
 from torch import nn
 
+from clip_attention import attention_profile as clip_attention_profile
+
 
 class CLIPConditioner(nn.Module):
     mean: torch.Tensor
     std: torch.Tensor
 
-    def __init__(self):
+    def __init__(self, attention_profile="native"):
         super().__init__()
+        if attention_profile not in {"native", "math"}:
+            raise ValueError(f"Unknown CLIP attention profile: {attention_profile}")
+        self.attention_profile = attention_profile
         self.module = open_clip.create_model_and_transforms(
             "ViT-H-14", pretrained="laion2b_s32b_b79k"
         )[0]
@@ -34,6 +39,7 @@ class CLIPConditioner(nn.Module):
         return x
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.preprocess(x)
-        x = self.module.encode_image(x)
+        with clip_attention_profile(self.attention_profile, torch):
+            x = self.preprocess(x)
+            x = self.module.encode_image(x)
         return x

@@ -18,10 +18,14 @@ show all three two-action `observe` GPU runs reaching export. Even the two
 unbounded repeats differ in first-action merge counts. User-run fingerprint
 comparisons now locate the earliest mismatch in initial CLIP embeddings in
 both pairs. Recorded input/VAE latents, RNG states and diffusion/sampler noise
-match, as do listed provenance/environment fields. See the new, untested
-[encoder-only probe](VMEM_CLIP_PROBE.md). Isolated-mode GPU validation remains
-pending; default RNG
-behavior is unchanged, but
+match, as do listed provenance/environment fields. The subsequent user-run
+[encoder-only probes](VMEM_CLIP_PROBE.md) show stable preprocessing and matching
+loaded weights, variable native embeddings, and bitwise-repeatable math-profile
+embeddings within/across fresh processes. A short full-pipeline integration of
+that profile, opt-in and CLIP-only for both arms, is now pending validation.
+This does not identify a particular kernel defect or explain the long-run
+quality direction. Isolated-mode GPU validation remains pending; default RNG
+and native attention behavior are unchanged, but
 source hashes have changed. No old experiment lock or result was overwritten.
 
 ## Findings

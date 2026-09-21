@@ -54,6 +54,9 @@ def compare(left_path, right_path):
                 "step_size", "fps", "frame_storage", "memory_scope", "inference_steps", "surfel_niter",
                 "surfel_reconstruction_window", "visualize_intermediates")
     mismatches = [f"arguments.{key}" for key in settings if a.get(key) != b.get(key)]
+    # Older runs predate the flag and always used native CLIP dispatch.
+    if a.get("clip_attention", "native") != b.get("clip_attention", "native"):
+        mismatches.append("arguments.clip_attention")
     missing = [f"arguments.{key}" for key in settings if key not in a or key not in b]
     for key in ("image_sha256", "config_sha256", "source_sha256", "checkpoint_sha256"):
         values = [run["spec"].get("provenance", {}).get(key) for run in (left, right)]
@@ -77,6 +80,7 @@ def compare(left_path, right_path):
     return {"schema": "vmem_generation_debug_comparison_v1",
             "left": str(left_path), "right": str(right_path),
             "policies": [a["memory_policy"], b["memory_policy"]],
+            "clip_attention": [a.get("clip_attention", "native"), b.get("clip_attention", "native")],
             "settings_mismatches": mismatches, "missing_provenance": missing,
             "environment_equal": left["environment"] == right["environment"],
             "all_recorded_events_equal": not differences,

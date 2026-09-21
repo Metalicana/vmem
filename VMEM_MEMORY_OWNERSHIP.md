@@ -21,9 +21,13 @@ unbounded `observe` repeats and GeoCov-32 completing two GPU actions and export.
 Both user-run fingerprint comparisons (unbounded repeat and unbounded/GeoCov)
 first differ in the initial CLIP embeddings. Input, initial VAE latent, recorded
 RNG states and initial/sampler noise match. This localizes the earliest
-discrepancy to image encoding, not eviction; the cause and later quality impact
-remain unresolved. A standalone [CLIP probe](VMEM_CLIP_PROBE.md) is now available
-but untested. Isolated-mode GPU behavior is not yet validated.
+discrepancy to image encoding, not eviction. The user's subsequent standalone
+[CLIP probes](VMEM_CLIP_PROBE.md) show variable native embeddings with matching
+inputs/weights and bitwise-stable math-profile embeddings within/across two
+fresh processes. An opt-in CLIP-only `--clip-attention math` integration now
+awaits a short full-pipeline check in both arms. The particular kernel cause
+and long-run quality impact remain unresolved; isolated-mode GPU behavior is
+also not yet validated.
 These changes do not change the old videos or GeoCov
 scores. Default RNG behavior is unchanged; source hashes are new.
 

@@ -82,7 +82,9 @@ class VMemPipeline:
         
         self.vae = AutoEncoder(chunk_size=1).to(device, dtype)
         self.vae.eval()
-        self.image_encoder = CLIPConditioner().to(device, dtype)
+        self.image_encoder = CLIPConditioner(
+            attention_profile=config.model.get("clip_attention", "native")
+        ).to(device, dtype)
         self.image_encoder.eval()
         
         self.discretization = DDPMDiscretization()

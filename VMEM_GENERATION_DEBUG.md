@@ -8,6 +8,14 @@ outliers, not proof of a different noise sample, a specific nondeterministic
 kernel, or a GeoCov defect. Eviction only happens after frame 32. The later
 negative VBench results remain recorded.
 
+**Current next gate:** the user completed the standalone CLIP probes. Native
+embeddings vary with matching inputs/weights, whereas math-profile embeddings
+are bitwise equal within and across both fresh processes. The new opt-in
+`--clip-attention math` scopes that profile to all CLIP encoding calls. Run the
+[full-pipeline math triplet](VMEM_CLIP_PROBE.md#full-pipeline-gate) next, keeping
+`observe` RNG behavior. This integration and its updated tests await CECSL
+validation. The native triplet below is historical, not a request to repeat it.
+
 ## Implementation
 
 The runner accepts optional `--generation-debug observe|isolated`:
@@ -66,8 +74,8 @@ The recorded input, VAE latent, RNG states and all diffusion/sampler noise match
 conditioning and generated values subsequently differ. Listed provenance and
 environments match. This identifies the initial image-encoder path, not a
 policy-specific eviction defect. The nine-frame pixel comparison and isolated
-GPU mode remain unreported. See [the encoder-only probe](VMEM_CLIP_PROBE.md);
-no additional video generation is requested at this stage.
+GPU mode remain unreported. The subsequent [encoder-only probe](VMEM_CLIP_PROBE.md)
+is complete; its stable math profile motivates the new full-pipeline gate above.
 
 The user ran the full suite in the CECSL `vmem` environment on 2026-09-21:
 122 tests reported, 119 passed, three VBench video-writer encoding tests skipped
@@ -85,10 +93,10 @@ CUDA_VISIBLE_DEVICES="" python -m unittest discover -s tests -v
 New CPU tests cover RNG restoration, different reconstruction draw counts,
 observation parity, real sampler callback parity, fingerprints, short-run
 guards and diagnostic completeness. They do not certify neural GPU parity.
-The CPU gate has passed; choose a currently free GPU using `nvidia-smi`. Use the
-generation environment, not VBench, for this predefined **three-run, two-action**
-diagnostic. Two identical unbounded runs measure repeat variation; the third
-uses GeoCov-32. All end at nine frames, so none can evict a frame.
+That earlier CPU gate passed. The following commands document the completed
+native **three-run, two-action** diagnostic. Two identical unbounded runs
+measure repeat variation; the third uses GeoCov-32. All end at nine frames, so
+none can evict a frame. Use the new gate above for the next run.
 
 ```bash
 GPU=1
@@ -135,7 +143,7 @@ and check reported settings/provenance/environment differences.
   not evidence of a GeoCov-specific bug. Compare magnitude and growth, not
   just equality. A matching short prefix does not validate 60-second behavior.
 
-Review observe results first. A separately named `isolated` repeat of the same
+Review the math/observe full-pipeline results first. A separately named `isolated` repeat of the same
 triplet can then test matched stochastic inputs; use a new output root. After
 the no-eviction gate, a predefined short B=32 pair can cross the eviction
 boundary. No remaining-suite launch or scoring-rule tuning follows from this

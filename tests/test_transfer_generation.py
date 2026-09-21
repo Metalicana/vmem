@@ -81,6 +81,7 @@ class TransferGenerationTest(unittest.TestCase):
             self.assertEqual(first["config_sha256"], second["config_sha256"])
             self.assertEqual(first["source_sha256"], second["source_sha256"])
             self.assertIn("modeling/pipeline.py", first["source_sha256"])
+            self.assertIn("clip_attention.py", first["source_sha256"])
 
     def test_navigator_initialization_preserves_other_run_outputs(self):
         # Execute the real initialization method without importing CUDA dependencies.

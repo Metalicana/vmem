@@ -1,11 +1,13 @@
 import ast
 import importlib.util
+import io
 import json
 from pathlib import Path
 import random
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -34,10 +36,29 @@ class DebugContractTest(unittest.TestCase):
                 validate_debug_args(SimpleNamespace(**{**args, key: value}))
         validate_debug_args(SimpleNamespace(generation_debug=None))
 
+    def test_math_clip_requires_short_fresh_debug_before_runtime_load(self):
+        from scripts import run_vmem_demo_actions as runner
+        base = ["runner", "--image", "test_samples/oxford.jpg", "--dry-run", "--clip-attention", "math"]
+        debug = ["--generation-debug", "observe", "--checkpoint-every", "0", "--num-actions", "2"]
+        invalid = [[], debug + ["--experiment-lock", "old.json"],
+                   debug + ["--resume-from", "old-run"], debug + ["--checkpoint-every", "5"],
+                   debug + ["--num-actions", "13"], debug + ["--frames-per-action", "8"]]
+        with patch.object(runner, "_load_runtime_dependencies") as load_runtime:
+            for extra in invalid:
+                with self.subTest(extra=extra), patch("sys.argv", base + extra), self.assertRaises(ValueError):
+                    runner.main()
+            for profile in ("native", "math"):
+                argv = base + debug + ["--clip-attention", profile]
+                with patch("sys.argv", argv), patch("sys.stdout", new_callable=io.StringIO) as output:
+                    runner.main()
+                    self.assertEqual(json.loads(output.getvalue())["clip_attention"], profile)
+            load_runtime.assert_not_called()
+
     def test_modified_production_hooks_compile_without_importing_models(self):
         for relative in ("generation_debug.py", "utils/util.py", "modeling/pipeline.py",
                          "modeling/sampling.py", "scripts/run_vmem_demo_actions.py",
-                         "scripts/audit_vmem_generation_debug.py"):
+                         "scripts/audit_vmem_generation_debug.py", "clip_attention.py",
+                         "modeling/modules/conditioner.py"):
             with self.subTest(file=relative):
                 compile((ROOT / relative).read_text(), relative, "exec")
         tree = ast.parse((ROOT / "utils/util.py").read_text())
@@ -81,6 +102,18 @@ class DebugComparisonTest(unittest.TestCase):
         self.assertTrue(report["all_recorded_events_equal"])
         self.assertEqual(report["settings_mismatches"], [])
         self.assertEqual(report["missing_provenance"], [])
+
+    def test_clip_profile_is_compared_with_legacy_native_default(self):
+        path = self.right / "run_spec.json"
+        spec = json.loads(path.read_text())
+        for profile in ("native", "math"):
+            spec["arguments"]["clip_attention"] = profile
+            path.write_text(json.dumps(spec))
+            report = compare(self.left, self.right)
+            self.assertEqual(report["clip_attention"], ["native", profile])
+            self.assertEqual(report["settings_mismatches"],
+                             [] if profile == "native" else ["arguments.clip_attention"])
+            self.assertEqual(report["missing_provenance"], [])
 
     def test_reports_first_sampler_noise_difference(self):
         self.rows[-1]["noise"] = "different"

@@ -2,7 +2,6 @@
 """Probe initial CLIP encoding without loading VMem/VAE/CUT3R weights or generating video."""
 
 import argparse
-from contextlib import contextmanager
 import hashlib
 import inspect
 import json
@@ -16,6 +15,8 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+from clip_attention import attention_profile
 
 SCHEMA = "vmem_clip_probe_v1"
 
@@ -49,25 +50,6 @@ def model_fingerprint(model, debug):
                     for name, value in model.named_buffers()})
     digest = hashlib.sha256(json.dumps(entries, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     return {"sha256": digest, "tensors": entries}
-
-
-@contextmanager
-def attention_profile(profile, torch):
-    if profile == "native":
-        yield
-        return
-    if profile != "math":
-        raise ValueError(f"Unknown attention profile: {profile}")
-    from torch.nn.attention import SDPBackend, sdpa_kernel
-
-    previous = torch.backends.mha.get_fastpath_enabled()
-    try:
-        # MHA's native fast path can bypass the SDPA backend selection.
-        torch.backends.mha.set_fastpath_enabled(False)
-        with sdpa_kernel(SDPBackend.MATH):
-            yield
-    finally:
-        torch.backends.mha.set_fastpath_enabled(previous)
 
 
 def resolve_repo_path(value):
@@ -118,7 +100,8 @@ def run(args):
         raise ValueError("An encoder module is still in training mode")
 
     sources = {str(path.relative_to(ROOT)): digest_file(path) for path in (
-        Path(__file__).resolve(), ROOT / "modeling/modules/conditioner.py", ROOT / "utils/util.py")}
+        Path(__file__).resolve(), ROOT / "clip_attention.py",
+        ROOT / "modeling/modules/conditioner.py", ROOT / "utils/util.py")}
     import kornia
     for label, obj in (("installed_clip", type(encoder.module)),
                        ("installed_visual", type(encoder.module.visual)),

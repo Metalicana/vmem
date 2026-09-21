@@ -13,7 +13,7 @@ direction of the metric differences. See [the implementation review and
 read-only pairing diagnostic](VMEM_IMPLEMENTATION_REVIEW.md). The controller's
 arithmetic and low-score eviction direction match the sibling implementations;
 no invalid frame access or broken resident release was found. Production
-generation code, policies and frozen manifests remain unchanged. Diagnose
+generation behavior, policies and frozen manifests were unchanged by that initial review. Diagnose
 these controls before running the remaining suite or making a causal claim.
 
 Follow-up CECSL audit: all 21 pairing/pixel tests passed. The hash-verified
@@ -28,10 +28,12 @@ logs for all three two-action `observe` GPU runs. The two unbounded repeats
 already differ in first-action merge counts. Subsequent fingerprint comparisons
 identify initial CLIP embeddings as the first mismatch in both the unbounded
 repeat and the unbounded/GeoCov pair, with matching recorded input/VAE latent,
-RNG states and diffusion noise. An untested [encoder-only probe](VMEM_CLIP_PROBE.md)
-now separates preprocessing, loaded weights and attention-dispatch repeatability.
-The numerical cause and long-run quality impact remain unresolved; isolated-mode
-GPU validation also remains pending.
+RNG states and diffusion noise. The user's subsequent [encoder-only probes](VMEM_CLIP_PROBE.md)
+show matching inputs/loaded weights and stable preprocessing, but variable
+native embeddings. The math profile is bitwise repeatable within/across the
+two tested processes. New opt-in CLIP-only integration awaits a full-pipeline
+short-run check in both arms. The particular kernel cause and long-run quality
+impact remain unresolved; isolated-mode GPU validation also remains pending.
 Default behavior and scoring are unchanged, but
 source hashes have changed. Preserve the old lock/results. No controller
 improvement is implied by the diagnostic or by passing CPU tests.

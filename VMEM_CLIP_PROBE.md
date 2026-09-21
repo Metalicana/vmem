@@ -25,6 +25,32 @@ underlying model's parameters have gradients disabled. The path is Kornia
 resize/normalization followed by OpenCLIP image encoding. Do not silently swap
 the descriptor, round/cache embeddings, or modify only the GeoCov arm.
 
+### Completed Encoder Probes, 2026-09-21
+
+The user supplied all four CECSL probe reports (`native_a`, `native_b`, `math_a`,
+`math_b`), with three forwards per process. All report matching reference
+environments. Across each same-profile pair, the input, loaded parameters and
+buffers, recorded sources and environment match. Preprocessing is bitwise
+identical within and across the processes.
+
+| Profile | Within-process embeddings | Across-process embeddings |
+|---|---|---|
+| Native | Differ on repeated forwards in both processes | Differ at all three repetitions; relative L2 0.00354-0.00591 |
+| Math | Bitwise equal in both processes | Bitwise equal at all three repetitions; zero measured error |
+
+This supports a repeatability issue associated with native attention dispatch
+in the tested CLIP path. It does not identify one faulty kernel: the math
+profile changes both MHA fast-path eligibility and SDPA selection. It also does
+not prove the cause or direction of the 60-second GeoCov quality difference.
+`matches_reference_embedding: false` is not a probe failure: that reference was
+itself produced by the variable native path. The relevant comparison is
+repeatability with matching inputs and weights, not agreement with that one
+reference embedding.
+
+The next gate is a short full-generator triplet using the same math profile
+symmetrically, documented below. Do not rerun the completed probe commands or
+launch the long suite yet.
+
 ## Probe Scope
 
 [probe_vmem_clip.py](scripts/probe_vmem_clip.py) uses the existing image loader
@@ -52,16 +78,16 @@ Run each profile in two fresh processes:
   [SDPA backend control](https://docs.pytorch.org/docs/2.7/generated/torch.nn.attention.sdpa_kernel.html)
   and [MHA fast-path control](https://docs.pytorch.org/docs/2.7/backends.html#torch.backends.mha).
 
-No generation source or frozen protocol is changed by adding this standalone
-probe. Its reduced model-load/allocator history differs from full VMem; stable
-probe results alone cannot certify full-pipeline reproducibility. A stable math
-probe would motivate a symmetric, versioned full-pipeline control, not an
-immediate rerun of the benchmark or a quality-improvement claim.
+The original standalone probe did not change generation. Its reduced model-load/
+allocator history differs from full VMem; stable probe results alone cannot
+certify full-pipeline reproducibility. The follow-up integration below changes
+generation source hashes, but neither the frozen manifests nor old artifacts.
 
-## CECSL Commands
+## Completed Probe Commands
 
-Nothing below has been run on the Mac. New probe tests and GPU behavior are
-pending user execution. First run the CPU tests in the generation environment:
+Historical commands, retained for reproducibility. GPU reports have now been
+supplied by the user; nothing was run on the Mac. Updated CPU tests still need
+user execution after pulling the integration changes:
 
 ```bash
 conda activate vmem
@@ -95,3 +121,71 @@ visual forward path; varying preprocessing must be investigated first. Weight
 differences invalidate a numerical-kernel interpretation. Native/math outputs
 need not match each other; the test is within-profile repeatability, including
 across fresh processes, without selecting settings by video-quality wins.
+
+## Full-Pipeline Gate
+
+`--clip-attention math` applies that exact profile through `CLIPConditioner`
+to both initial-image encoding and every generated-frame batch. The profile
+helper is shared with the probe in `clip_attention.py`. Backend state is
+restored on normal return or error, so it does not wrap VMem diffusion or
+CUT3R reconstruction. It does not change checkpoints, GeoCov scoring, the CLIP
+descriptor type, RNG handling, TF32 flags or the caller's autocast context.
+In particular, the initial encoding remains FP32 and generated-frame encoding
+keeps the existing generation autocast. These latter GPU calls are not yet
+validated by the standalone initial-image probe.
+
+The default remains `native`. The action runner currently accepts `math` only
+for fresh, unlocked `--generation-debug` runs with checkpoints disabled and at
+most 12 four-frame actions. Resume and frozen-manifest runs are not being
+migrated yet. The runner records the profile in its arguments, metadata and
+effective YAML; provenance includes the shared helper. Both comparison tools
+flag mismatched profiles, treating historical absent flags as native.
+
+After pushing/pulling, first run the CPU suite on CECSL, not on the Mac:
+
+```bash
+conda activate vmem
+CUDA_VISIBLE_DEVICES="" python -m unittest discover -s tests -v
+nvidia-smi
+```
+
+If tests pass and GPU 1 is available, run this **three-process, two-action**
+control. It uses `observe`, not `isolated`, so the only numerical intervention
+relative to the earlier triplet is CLIP attention dispatch. Each video has nine
+frames: no GeoCov eviction is possible. This bash loop runs sequentially and
+does not reserve GPU memory.
+
+```bash
+GPU=1
+ROOT=outputs/vmem_debug_clip_math_v1
+for CASE in unbounded_a unbounded_b geocov32; do
+  POLICY=(--memory-policy unbounded)
+  if [ "$CASE" = geocov32 ]; then
+    POLICY=(--memory-policy slam_covisibility --memory-budget 32)
+  fi
+  CUDA_VISIBLE_DEVICES="$GPU" python -u scripts/run_vmem_demo_actions.py \
+    --image test_samples/oxford.jpg --run-id "debug_math_${CASE}" \
+    --output-root "$ROOT" --trajectory pan_45 --num-actions 2 \
+    --fps 13 --frames-per-action 4 --step-size 0.1 --seed 501 \
+    --frame-storage resident --memory-scope surfel_indexed_view_memory \
+    --inference-steps 50 --surfel-niter 400 --checkpoint-every 0 \
+    --generation-debug observe --clip-attention math "${POLICY[@]}" || break
+done
+```
+
+Set `A`, `B`, `C` to the exact printed directories for unbounded A, unbounded B
+and GeoCov-32, respectively, without mixing previous attempts:
+
+```bash
+python scripts/audit_vmem_generation_debug.py --left "$A" --right "$B"
+python scripts/audit_vmem_generation_debug.py --left "$A" --right "$C"
+python scripts/audit_vmem_pairing.py --unbounded "$A" --bounded "$C" --compare-pixels
+```
+
+Require matching settings/provenance/environment before interpreting the
+fingerprints. Check initial encoding, conditioning, noise, decoded values,
+geometry/retrieval traces and all nine saved frames. If they differ, investigate
+the earliest remaining mismatch instead of launching 60-second runs. Even a
+passing short gate does not prove full CUDA determinism or long-run quality.
+The separate post-eviction RNG issue still needs an isolated-phase control.
+No new GPU validation or quality result for this integration is available yet.
