@@ -31,9 +31,14 @@ repeat and the unbounded/GeoCov pair, with matching recorded input/VAE latent,
 RNG states and diffusion noise. The user's subsequent [encoder-only probes](VMEM_CLIP_PROBE.md)
 show matching inputs/loaded weights and stable preprocessing, but variable
 native embeddings. The math profile is bitwise repeatable within/across the
-two tested processes. New opt-in CLIP-only integration awaits a full-pipeline
-short-run check in both arms. The particular kernel cause and long-run quality
-impact remain unresolved; isolated-mode GPU validation also remains pending.
+two tested processes. The opt-in CLIP-only math integration now has a passed
+two-action generation-output check: all recorded events match for both
+unbounded-repeat and unbounded/GeoCov comparisons, and all nine A/C decoded
+frames match with saved PNG hashes verified. Geometry does not match (679 versus
+678 surfels after the first update); selected contexts still match. These debug
+events do not hash geometry outputs. See the [completed check and limits](VMEM_CLIP_PROBE.md#completed-generation-check-2026-09-21).
+The particular kernel cause and long-run quality impact remain unresolved;
+isolated-mode GPU validation after eviction also remains pending.
 Default behavior and scoring are unchanged, but
 source hashes have changed. Preserve the old lock/results. No controller
 improvement is implied by the diagnostic or by passing CPU tests.

@@ -8,13 +8,14 @@ outliers, not proof of a different noise sample, a specific nondeterministic
 kernel, or a GeoCov defect. Eviction only happens after frame 32. The later
 negative VBench results remain recorded.
 
-**Current next gate:** the user completed the standalone CLIP probes. Native
-embeddings vary with matching inputs/weights, whereas math-profile embeddings
-are bitwise equal within and across both fresh processes. The new opt-in
-`--clip-attention math` scopes that profile to all CLIP encoding calls. Run the
-[full-pipeline math triplet](VMEM_CLIP_PROBE.md#full-pipeline-gate) next, keeping
-`observe` RNG behavior. This integration and its updated tests await CECSL
-validation. The native triplet below is historical, not a request to repeat it.
+**Current result:** the user completed the standalone CLIP probes and the
+two-action `math`/`observe` full-generator triplet. Both unbounded-repeat and
+unbounded/GeoCov comparisons have identical recorded generation events; the
+unbounded/GeoCov audit also verifies identical decoded pixels in all nine
+frames. Geometry still differs after the first update (679 versus 678 surfels),
+despite matching selected contexts. See the [measured results](VMEM_CLIP_PROBE.md#completed-generation-check-2026-09-21).
+This is a passed short generation-output check, not a passed geometry or
+post-eviction check. Completed triplet commands below are historical.
 
 ## Implementation
 
@@ -46,6 +47,12 @@ package versions, Torch build, selected GPU, backend precision/determinism
 flags and relevant environment variables. Existing run specs retain input,
 config, source and recorded VMem/CUT3R checkpoint hashes. This is not an
 exhaustive hash of dependencies or VAE/CLIP weights.
+
+The reconstruction phase events record RNG states only, not reconstructed
+geometry. Consequently `all_recorded_events_equal: true` can coexist with
+different surfel counts, positions and references. Use resource/retrieval
+traces alongside the generation comparison; geometry count equality alone
+would not prove full geometry equality either.
 
 Default runs do not construct a diagnostic or change RNG behavior. Debug runs
 must be fresh, unlocked, 1-12 actions, four frames per action, with
@@ -143,10 +150,12 @@ and check reported settings/provenance/environment differences.
   not evidence of a GeoCov-specific bug. Compare magnitude and growth, not
   just equality. A matching short prefix does not validate 60-second behavior.
 
-Review the math/observe full-pipeline results first. A separately named `isolated` repeat of the same
-triplet can then test matched stochastic inputs; use a new output root. After
-the no-eviction gate, a predefined short B=32 pair can cross the eviction
-boundary. No remaining-suite launch or scoring-rule tuning follows from this
-diagnostic. Promoting the RNG change to the benchmark requires a new version,
+The math/observe generation-output gate has passed for the supplied nine-frame
+comparison. Investigate the remaining geometry variation with fixed inputs;
+do not require regenerating the same videos just to inspect reconstruction.
+A predefined short B=32 control crossing the eviction boundary still needs
+isolated phase RNG to verify matched diffusion noise after reconstruction sizes
+diverge. No remaining-suite launch or scoring-rule tuning follows from the
+short result. Promoting the RNG change to the benchmark requires a new version,
 lock, both arms and recovery validation; this debug implementation does not
 perform that migration.

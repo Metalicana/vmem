@@ -24,10 +24,18 @@ RNG states and initial/sampler noise match. This localizes the earliest
 discrepancy to image encoding, not eviction. The user's subsequent standalone
 [CLIP probes](VMEM_CLIP_PROBE.md) show variable native embeddings with matching
 inputs/weights and bitwise-stable math-profile embeddings within/across two
-fresh processes. An opt-in CLIP-only `--clip-attention math` integration now
-awaits a short full-pipeline check in both arms. The particular kernel cause
-and long-run quality impact remain unresolved; isolated-mode GPU behavior is
-also not yet validated.
+fresh processes. The opt-in CLIP-only `--clip-attention math` integration has
+now passed the two-action generation-output check: recorded events match in
+both unbounded-repeat and unbounded/GeoCov comparisons, and all nine A/C saved
+frames have hash-verified identical decoded pixels. Geometry still differs
+(679 versus 678 surfels after the first update), while selected contexts and
+reconstruction input indices match. Debug phase RNG hashes do not hash geometry.
+See the [measured results and reconstruction follow-up](VMEM_CLIP_PROBE.md#completed-generation-check-2026-09-21).
+The particular kernel cause, long-run quality impact, and isolated-mode
+post-eviction GPU behavior remain unresolved.
+A [fixed-input reconstruction probe](VMEM_RECONSTRUCTION_PROBE.md) is now
+available to localize the remaining variation without generating more video.
+It loads only CUT3R weights; CPU tests and GPU validation await CECSL execution.
 These changes do not change the old videos or GeoCov
 scores. Default RNG behavior is unchanged; source hashes are new.
 

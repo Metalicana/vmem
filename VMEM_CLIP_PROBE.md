@@ -47,9 +47,61 @@ itself produced by the variable native path. The relevant comparison is
 repeatability with matching inputs and weights, not agreement with that one
 reference embedding.
 
-The next gate is a short full-generator triplet using the same math profile
-symmetrically, documented below. Do not rerun the completed probe commands or
-launch the long suite yet.
+The subsequent full-generator triplet using the same math profile symmetrically
+has now completed, with the results below. Do not rerun the completed controls
+or launch the long suite from this evidence alone.
+
+### Completed Generation Check, 2026-09-21
+
+The user supplied completion logs and audit output for these CECSL runs under
+`outputs/vmem_debug_clip_math_v1`:
+
+- A: `debug_math_unbounded_a_pan_45_A2_unbounded_20260921_150029`
+- B: `debug_math_unbounded_b_pan_45_A2_unbounded_20260921_150130`
+- C: `debug_math_geocov32_pan_45_A2_slam_covisibility_B32_20260921_150232`
+
+Both A/B and A/C comparisons report `clip_attention: [math, math]`, equal
+recorded environments, no settings/provenance mismatches or missing listed
+provenance, and zero different recorded generation events. Initial CLIP/VAE
+encoding, conditioning, initial/sampler noise, final diffusion latents and
+decoded samples match across these two-action runs. The A/C pixel audit
+additionally verifies all saved PNG hashes and finds all nine decoded frames
+identical. Actions, eligible frames, selected contexts and reconstruction frame
+indices match. No eviction occurs: the bank never reaches B=32.
+
+This passes the short generation-output check, not full memory-state parity.
+The A/C resource audit reports 679 versus 678 surfels after the first update
+(step 0), also seen at retrieval on step 1. The preceding completion logs show
+different first-action merge counts even between A and B: A `[218,144,255,283]`,
+B `[215,164,266,276]`; C `[218,143,249,282]`. Therefore geometry variation also
+occurs without changing policy.
+
+`all_recorded_events_equal` is not a geometry-equivalence assertion: existing
+debug events hash reconstruction phase RNG states, not CUT3R predictions,
+aligned depths/points/confidences, or the full surfel/reference bank. A one-item
+count difference does not bound differences in surfel values or references.
+In these nine frames it has not changed the selected contexts or decoded
+video; its effect at longer duration is unknown.
+
+Static follow-up found that the already-supplied first-action `init edge (0*,1*)`
+scores differ: A `25.695222854614258`, B `25.696765899658203`, C
+`25.692729949951172`. These are computed from means of predicted confidences
+in [edge_conf](extern/CUT3R/cloud_opt/commons.py), invoked before the optimization
+loop by [minimum_spanning_tree](extern/CUT3R/cloud_opt/dust3r_opt/init_im_poses.py).
+The confidence arrays come from `pred1.conf_self` and `pred2.conf` in the
+[aligner constructor](extern/CUT3R/cloud_opt/dust3r_opt/base_opt.py).
+This places an observed discrepancy before iterative alignment and surfel
+merging. It does not distinguish prediction differences from preprocessing or
+confidence-score computation, and it does not identify a faulty CUDA kernel.
+
+The next targeted diagnostic holds the first five saved RGB inputs and
+commanded poses fixed and compares reconstruction preprocessing, raw CUT3R
+predictions and aligned outputs before investigating merge thresholds. A
+[reconstruction-only probe](VMEM_RECONSTRUCTION_PROBE.md) is now implemented,
+with CPU tests and GPU results pending user execution on CECSL. No geometry
+algorithm was changed and no GPU run was performed here. The separate policy-dependent diffusion RNG issue
+after eviction also remains pending an isolated-phase, budget-crossing control.
+These results do not reverse the old VBench scores or establish a quality gain.
 
 ## Probe Scope
 
@@ -124,6 +176,9 @@ across fresh processes, without selecting settings by video-quality wins.
 
 ## Full-Pipeline Gate
 
+The commands below document the completed two-action control, not a request to
+repeat it. See the measured generation/geometry distinction above.
+
 `--clip-attention math` applies that exact profile through `CLIPConditioner`
 to both initial-image encoding and every generated-frame batch. The profile
 helper is shared with the probe in `clip_attention.py`. Backend state is
@@ -131,8 +186,9 @@ restored on normal return or error, so it does not wrap VMem diffusion or
 CUT3R reconstruction. It does not change checkpoints, GeoCov scoring, the CLIP
 descriptor type, RNG handling, TF32 flags or the caller's autocast context.
 In particular, the initial encoding remains FP32 and generated-frame encoding
-keeps the existing generation autocast. These latter GPU calls are not yet
-validated by the standalone initial-image probe.
+keeps the existing generation autocast. The full-generator check now provides
+short-run conditioning/output agreement, beyond the initial-image-only probe;
+it does not verify every archived embedding or longer-run behavior.
 
 The default remains `native`. The action runner currently accepts `math` only
 for fresh, unlocked `--generation-debug` runs with checkpoints disabled and at
@@ -188,4 +244,5 @@ geometry/retrieval traces and all nine saved frames. If they differ, investigate
 the earliest remaining mismatch instead of launching 60-second runs. Even a
 passing short gate does not prove full CUDA determinism or long-run quality.
 The separate post-eviction RNG issue still needs an isolated-phase control.
-No new GPU validation or quality result for this integration is available yet.
+The user-run short GPU validation above is available. No new quality evaluation,
+post-eviction validation or full geometry parity result is available.

@@ -21,10 +21,17 @@ both pairs. Recorded input/VAE latents, RNG states and diffusion/sampler noise
 match, as do listed provenance/environment fields. The subsequent user-run
 [encoder-only probes](VMEM_CLIP_PROBE.md) show stable preprocessing and matching
 loaded weights, variable native embeddings, and bitwise-repeatable math-profile
-embeddings within/across fresh processes. A short full-pipeline integration of
-that profile, opt-in and CLIP-only for both arms, is now pending validation.
-This does not identify a particular kernel defect or explain the long-run
-quality direction. Isolated-mode GPU validation remains pending; default RNG
+embeddings within/across fresh processes. The subsequent CLIP-only math
+full-generator control now passes recorded generation-event equality in both
+unbounded-repeat and unbounded/GeoCov comparisons. All nine A/C decoded frames
+are identical with saved-file hashes verified. Geometry still differs after
+the first update (679 versus 678 surfels), without changing selected contexts.
+Existing phase-event fingerprints do not cover reconstruction outputs.
+See the [completed check](VMEM_CLIP_PROBE.md#completed-generation-check-2026-09-21)
+for earlier differing confidence-derived edge scores and the pending fixed-input
+reconstruction diagnostic. This does not identify a particular kernel defect
+or explain the long-run quality direction. Isolated-mode GPU validation remains
+pending; default RNG
 and native attention behavior are unchanged, but
 source hashes have changed. No old experiment lock or result was overwritten.
 
