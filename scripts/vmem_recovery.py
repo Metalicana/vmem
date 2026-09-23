@@ -16,6 +16,7 @@ import time
 import numpy as np
 from PIL import Image
 from frame_storage import restore_resident_array_ownership, validate_resident_payloads
+from generation_rng import EXECUTION_DEFAULTS, execution_settings
 
 
 SCHEMA = "vmem_recovery_v2"
@@ -35,6 +36,7 @@ IDENTITY_ARGS = (
     "inference_steps", "surfel_niter", "surfel_reconstruction_window",
     "visualize_intermediates", "resource_trace", "profile_warmup_steps", "checkpoint_every",
     "frame_storage",
+    "rng_mode", "clip_attention", "cut3r_attention",
 )
 
 
@@ -72,6 +74,7 @@ def atomic_json(path, value):
 
 
 def identity(arguments, provenance, torch_module):
+    arguments = {**EXECUTION_DEFAULTS, **arguments}
     return {
         "arguments": {key: str(arguments[key]) if isinstance(arguments[key], Path) else arguments[key]
                       for key in IDENTITY_ARGS},
@@ -79,6 +82,7 @@ def identity(arguments, provenance, torch_module):
             "source_sha256", "config_sha256", "image_sha256", "checkpoint_sha256", "experiment_lock_sha256",
         )},
         "torch_version": str(torch_module.__version__), "cuda_version": torch_module.version.cuda,
+        "execution": execution_settings(arguments),
     }
 
 

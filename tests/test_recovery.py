@@ -12,6 +12,7 @@ from unittest.mock import patch
 import numpy as np
 from PIL import Image
 
+from generation_rng import PhaseRNG, execution_settings
 from scripts import vmem_recovery as recovery
 from scripts.run_vmem_demo_manifest import _command_for_row, _selected_indices, run_logged
 from scripts.vmem_protocol import expected_settings, verify_lock
@@ -134,6 +135,39 @@ class RecoveryTest(unittest.TestCase):
             recovery.atomic_write(path, interrupted)
         self.assertEqual(recovery.digest_file(path), before)
         self.assertFalse(list(path.parent.glob("*.tmp-*")))
+
+    def test_isolated_rng_round_trip_uses_restored_global_step(self):
+        self.arguments.update(rng_mode="isolated", clip_attention="math", cut3r_attention="math")
+        self.run_identity = recovery.identity(self.arguments, {}, self.torch)
+        self.pipeline.generation_control = PhaseRNG(
+            seed=self.arguments["seed"], device="cpu", torch_module=self.torch)
+        with self.pipeline.generation_control.phase("diffusion", self.pipeline.global_step):
+            self.advance(self.pipeline, self.navigator, self.records)
+        self.commit()
+        with self.pipeline.generation_control.phase("diffusion", self.pipeline.global_step):
+            expected = self.advance(self.pipeline, self.navigator, self.records)
+        state, _ = recovery.load_checkpoint(self.source, self.run_identity, self.torch, "cpu")
+        self.assertEqual(state["identity"]["execution"], execution_settings(self.arguments))
+        self.assertNotIn("generation_control", state["pipeline"])
+        restored, navigator = fixture()
+        control = PhaseRNG(seed=self.arguments["seed"], device="cpu", torch_module=self.torch)
+        restored.generation_control = control
+        target = self.root / "isolated_resumed"
+        target.mkdir()
+        records, _, rng = recovery.restore_into_new_attempt(self.source, target, state, restored, navigator)
+        recovery.restore_rng(rng, self.torch, "cpu")
+        self.assertEqual(restored.global_step, 1)
+        self.assertIs(restored.generation_control, control)
+        with control.phase("reconstruction", 0):
+            self.torch.randn(100)
+        with control.phase("diffusion", restored.global_step):
+            actual = self.advance(restored, navigator, records)
+        self.assertEqual(actual, expected)
+        np.testing.assert_array_equal(restored.latents[-1], self.pipeline.latents[-1])
+        for key, value in (("rng_mode", "legacy"), ("clip_attention", "native"), ("cut3r_attention", "native")):
+            wrong = recovery.identity({**self.arguments, key: value}, {}, self.torch)
+            with self.assertRaisesRegex(ValueError, "identity mismatch"):
+                recovery.load_checkpoint(self.source, wrong, self.torch, "cpu")
 
     def test_trace_recovery_ignores_later_incomplete_tail_without_modifying_parent(self):
         trace = self.source / "resource_trace.jsonl"

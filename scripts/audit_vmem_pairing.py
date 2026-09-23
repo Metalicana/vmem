@@ -134,7 +134,8 @@ def compare_runs(unbounded, bounded, *, compare_pixels=False):
     if not isinstance(b["memory_budget"], int) or b["memory_budget"] < 2:
         raise ValueError("Expected a bounded bank with B >= 2")
     mismatches = [f"arguments.{key}" for key in SETTINGS if a.get(key) != b.get(key)]
-    for key, default in (("clip_attention", "native"), ("cut3r_attention", "native"), ("generation_debug", None)):
+    for key, default in (("clip_attention", "native"), ("cut3r_attention", "native"),
+                         ("rng_mode", "legacy"), ("generation_debug", None)):
         if a.get(key, default) != b.get(key, default):
             mismatches.append(f"arguments.{key}")
     missing = [f"arguments.{key}" for key in SETTINGS if key not in a or key not in b]

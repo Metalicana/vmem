@@ -55,8 +55,8 @@ def compare(left_path, right_path):
                 "surfel_reconstruction_window", "visualize_intermediates")
     mismatches = [f"arguments.{key}" for key in settings if a.get(key) != b.get(key)]
     # Older runs predate these flags and used native dispatch for both encoders.
-    for name in ("clip_attention", "cut3r_attention"):
-        if a.get(name, "native") != b.get(name, "native"):
+    for name, default in (("clip_attention", "native"), ("cut3r_attention", "native"), ("rng_mode", "legacy")):
+        if a.get(name, default) != b.get(name, default):
             mismatches.append(f"arguments.{name}")
     missing = [f"arguments.{key}" for key in settings if key not in a or key not in b]
     for key in ("image_sha256", "config_sha256", "source_sha256", "checkpoint_sha256"):

@@ -4,31 +4,32 @@ Observation never reseeds. Isolation is an experimental control, not a promise
 of deterministic CUDA kernels. Hashing copies tensors to CPU and affects timing.
 """
 
-from contextlib import contextmanager, ExitStack
+from contextlib import contextmanager, nullcontext
 import hashlib
 from importlib.metadata import PackageNotFoundError, version
 import json
 import os
 from pathlib import Path
-import random
 import sys
 
 import numpy as np
+from generation_rng import PhaseRNG, RNG_SCHEMA, phase_seed
 
 
 SCHEMA = "vmem_generation_debug_v1"
-RNG_SCHEMA = "vmem_phase_action_rng_v1"
-
-
-def phase_seed(seed, phase, step):
-    payload = json.dumps([RNG_SCHEMA, int(seed), phase, int(step)], separators=(",", ":"))
-    return int.from_bytes(hashlib.sha256(payload.encode()).digest()[:8], "big") % (2 ** 63)
 
 
 def validate_debug_args(args):
+    rng_mode = getattr(args, "rng_mode", "legacy")
+    if rng_mode not in ("legacy", "isolated"):
+        raise ValueError("Unknown RNG mode")
+    if args.generation_debug is not None and rng_mode != "legacy":
+        raise ValueError("Use --generation-debug isolated OR --rng-mode isolated, not both")
     for name in ("clip_attention", "cut3r_attention"):
-        if getattr(args, name, "native") != "native" and args.generation_debug is None:
-            raise ValueError(f"--{name.replace('_', '-')} math currently requires a short --generation-debug run")
+        if getattr(args, name, "native") not in ("native", "math"):
+            raise ValueError(f"Unknown attention profile: {name}")
+        if getattr(args, name, "native") != "native" and args.generation_debug is None and rng_mode != "isolated":
+            raise ValueError(f"--{name.replace('_', '-')} math requires --rng-mode isolated or a short --generation-debug run")
     if args.generation_debug is None:
         return
     if args.experiment_lock or args.resume_from or args.checkpoint_every:
@@ -50,6 +51,7 @@ class GenerationDebug:
         if self.device.type == "cuda":
             index = self.device.index
             self.devices = [torch_module.cuda.current_device() if index is None else index]
+        self.phase_rng = PhaseRNG(seed=seed, device=device, torch_module=torch_module)
         # Refuse to append to another attempt's diagnostic.
         with self.path.open("x") as handle:
             handle.write(json.dumps({"event": "schema", "schema": SCHEMA, "mode": mode,
@@ -84,21 +86,8 @@ class GenerationDebug:
 
     @contextmanager
     def phase(self, name, step):
-        torch = self.torch
         derived = phase_seed(self.seed, name, step) if self.mode == "isolated" else None
-        with ExitStack() as stack:
-            if derived is not None:
-                stack.callback(random.setstate, random.getstate())
-                stack.callback(np.random.set_state, np.random.get_state())
-                stack.enter_context(torch.random.fork_rng(devices=self.devices))
-                random.seed(derived)
-                np.random.seed(derived % (2 ** 32))
-                # Seed only the CPU and selected CUDA generator, not every GPU.
-                torch.set_rng_state(torch.Generator(device="cpu").manual_seed(derived).get_state())
-                if self.devices:
-                    selected = torch.device("cuda", self.devices[0])
-                    state = torch.Generator(device=selected).manual_seed(derived).get_state()
-                    torch.cuda.set_rng_state(state, selected)
+        with self.phase_rng.phase(name, step) if derived is not None else nullcontext():
             self.record("phase_start", step, phase=name, phase_seed=derived, rng=self.rng_state())
             try:
                 yield
@@ -109,27 +98,30 @@ class GenerationDebug:
                 self.record("phase_end", step, phase=name, rng=self.rng_state())
 
     def environment(self):
-        torch = self.torch
-        packages = {}
-        for name in ("numpy", "Pillow", "torch", "torchvision", "diffusers", "transformers",
-                     "open_clip_torch", "kornia", "huggingface_hub", "safetensors", "xformers"):
-            try:
-                packages[name] = version(name)
-            except PackageNotFoundError:
-                packages[name] = None
-        cuda = None
-        if self.devices:
-            index = self.devices[0]
-            cuda = {"logical_device": index, "name": torch.cuda.get_device_name(index),
-                    "capability": list(torch.cuda.get_device_capability(index))}
-        return {"python": sys.version, "packages": packages, "torch_build": torch.__config__.show(),
-                "cuda_version": torch.version.cuda, "selected_gpu": cuda,
-                "env": {key: os.environ.get(key) for key in (
-                    "CUDA_VISIBLE_DEVICES", "CUBLAS_WORKSPACE_CONFIG", "PYTHONHASHSEED",
-                    "NVIDIA_TF32_OVERRIDE", "TORCH_ALLOW_TF32_CUBLAS_OVERRIDE")},
-                "backends": {"deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
-                             "cudnn_benchmark": torch.backends.cudnn.benchmark,
-                             "cudnn_deterministic": torch.backends.cudnn.deterministic,
-                             "cudnn_allow_tf32": torch.backends.cudnn.allow_tf32,
-                             "matmul_allow_tf32": torch.backends.cuda.matmul.allow_tf32,
-                             "float32_matmul_precision": torch.get_float32_matmul_precision()}}
+        return generation_environment(self.torch, self.devices)
+
+
+def generation_environment(torch, devices):
+    packages = {}
+    for name in ("numpy", "Pillow", "torch", "torchvision", "diffusers", "transformers",
+                 "open_clip_torch", "kornia", "huggingface_hub", "safetensors", "xformers"):
+        try:
+            packages[name] = version(name)
+        except PackageNotFoundError:
+            packages[name] = None
+    cuda = None
+    if devices:
+        index = devices[0]
+        cuda = {"logical_device": index, "name": torch.cuda.get_device_name(index),
+                "capability": list(torch.cuda.get_device_capability(index))}
+    return {"python": sys.version, "packages": packages, "torch_build": torch.__config__.show(),
+            "cuda_version": torch.version.cuda, "selected_gpu": cuda,
+            "env": {key: os.environ.get(key) for key in (
+                "CUDA_VISIBLE_DEVICES", "CUBLAS_WORKSPACE_CONFIG", "PYTHONHASHSEED",
+                "NVIDIA_TF32_OVERRIDE", "TORCH_ALLOW_TF32_CUBLAS_OVERRIDE")},
+            "backends": {"deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
+                         "cudnn_benchmark": torch.backends.cudnn.benchmark,
+                         "cudnn_deterministic": torch.backends.cudnn.deterministic,
+                         "cudnn_allow_tf32": torch.backends.cudnn.allow_tf32,
+                         "matmul_allow_tf32": torch.backends.cuda.matmul.allow_tf32,
+                         "float32_matmul_precision": torch.get_float32_matmul_precision()}}

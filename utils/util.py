@@ -693,13 +693,15 @@ def do_sample(
     return_latents=False,
     device: str = "cuda",
     generation_debug=None,
+    generation_control=None,
     debug_step=None,
     **_,
 ):
 
     num_samples = [1, T]
+    control = generation_control if generation_control is not None else generation_debug
     with torch.inference_mode(), torch.autocast("cuda"), (
-        generation_debug.phase("diffusion", debug_step) if generation_debug is not None else nullcontext()
+        control.phase("diffusion", debug_step) if control is not None else nullcontext()
     ):
 
         if generation_debug is not None:

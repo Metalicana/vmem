@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
+from generation_rng import EXECUTION_DEFAULTS, execution_settings
 
 
 def scaling_actions(trajectory, num_actions):
@@ -64,6 +65,7 @@ def expected_settings(row):
         "checkpoint_every": row.get("checkpoint_every", 5),
         "frame_storage": row.get("frame_storage", "legacy"),
         "visualize_intermediates": row.get("visualize_intermediates", False),
+        **{key: row.get(key, default) for key, default in EXECUTION_DEFAULTS.items()},
     }
     num_actions = row.get("num_actions")
     if num_actions is None:
@@ -78,6 +80,8 @@ def expected_settings(row):
 
 def verify_lock(lock_path, arguments, provenance):
     lock = json.loads(Path(lock_path).read_text())
+    if arguments.get("generation_debug") is not None:
+        raise ValueError("Experiment locks do not permit debug timing runs")
     for key in ("source_sha256", "config_sha256"):
         if provenance[key] != lock[key]:
             raise ValueError(f"Experiment lock mismatch: {key}")
@@ -86,14 +90,22 @@ def verify_lock(lock_path, arguments, provenance):
         raise ValueError("Run ID is not in the experiment lock")
     if provenance["image_sha256"] != lock["image_sha256"][expected["image"]]:
         raise ValueError("Experiment lock mismatch: input image")
+    if lock.get("schema") == "vmem_experiment_lock_v4":
+        frozen_execution = lock.get("execution", {}).get(arguments["run_id"])
+        if frozen_execution != execution_settings(expected) or frozen_execution != execution_settings(arguments):
+            raise ValueError("Experiment lock mismatch: execution controls/schema")
     for key, value in expected_settings(expected).items():
-        if key == "checkpoint_every" and lock.get("schema") not in {"vmem_experiment_lock_v2", "vmem_experiment_lock_v3"}:
+        if key in EXECUTION_DEFAULTS and lock.get("schema") != "vmem_experiment_lock_v4":
+            if value != EXECUTION_DEFAULTS[key] or arguments.get(key, EXECUTION_DEFAULTS[key]) != EXECUTION_DEFAULTS[key]:
+                raise ValueError("Execution controls require a new v4 experiment lock")
             continue
-        if key == "frame_storage" and lock.get("schema") != "vmem_experiment_lock_v3":
+        if key == "checkpoint_every" and lock.get("schema") not in {"vmem_experiment_lock_v2", "vmem_experiment_lock_v3", "vmem_experiment_lock_v4"}:
+            continue
+        if key == "frame_storage" and lock.get("schema") not in {"vmem_experiment_lock_v3", "vmem_experiment_lock_v4"}:
             if arguments.get(key, "legacy") != "legacy" or value != "legacy":
                 raise ValueError("Resident storage requires a new v3 experiment lock")
             continue
-        actual = arguments.get(key)
+        actual = arguments.get(key, EXECUTION_DEFAULTS.get(key))
         if isinstance(actual, Path):
             actual = str(actual)
         if actual != value:

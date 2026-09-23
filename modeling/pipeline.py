@@ -1877,6 +1877,7 @@ class VMemPipeline:
                                          global_pbar=None, 
                                          return_latents=True,
                                          generation_debug=getattr(self, "generation_debug", None),
+                                         generation_control=getattr(self, "generation_control", None),
                                          debug_step=self.global_step,
                                          device=self.device)
 
@@ -1927,8 +1928,8 @@ class VMemPipeline:
             if profiler is not None:
                 profiler.reconstruction_input_indices = list(reconstruction_time_indices)
 
-            debug = getattr(self, "generation_debug", None)
-            with debug.phase("reconstruction", self.global_step) if debug is not None else nullcontext():
+            control = getattr(self, "generation_control", None) or getattr(self, "generation_debug", None)
+            with control.phase("reconstruction", self.global_step) if control is not None else nullcontext():
                 self.construct_and_store_scene(
                     reconstruction_frames,
                     time_indices=context_time_indices,

@@ -1,5 +1,22 @@
 # VMem Memory Ownership and Measurement Audit
 
+## 2026-09-23 Combined-Control Pass and V3
+
+The CECSL combined math-CLIP/math-CUT3R/isolated-RNG pair now passes: all 33
+saved images through first eviction match exactly, with no pre-eviction trace
+divergences. Diffusion noise matches throughout all 12 actions; reconstruction
+end-state RNG first differs at step 8 and conditioning/output at step 9, after
+eviction. Final resident counts are 32 per payload component for GeoCov versus
+49 for unbounded, with no pending evictions or illegal retrievals.
+
+The next experiment is a fresh matched 60-second pair, not another short
+diagnostic. [Transfer v3](VMEM_CONTROLLED_TRANSFER_V3.md) implements these same
+controls without tensor fingerprinting and includes recovery identity checks.
+The cases, seeds and GeoCov scores are unchanged. Added CPU tests await CECSL;
+no tests or experiments ran on the Mac. The new long-run and CUDA resume paths
+are not yet validated. Earlier quality results remain negative, not superseded
+by this repeatability pass. B still does not bound total process or disk memory.
+
 ## 2026-09-23 Math Reconstruction Pass
 
 The user-run math-attention CUT3R probe now matches all preprocessing (40),
@@ -10,11 +27,10 @@ result or a universal determinism guarantee.
 
 The generation runner now has opt-in `--cut3r-attention math`, scoped to CUT3R
 inference and restored before alignment. Its default is still native. GeoCov
-scores, model weights and existing results are unchanged. The next step is the
-[49-frame combined-attention pair](VMEM_GENERATION_DEBUG.md#combined-attention-generation-check),
-with math CLIP and isolated phase RNG as well. Integration tests and this new
-video pair await CECSL execution; no tests or experiments were run locally.
-The corrected resumable 60-second protocol is not yet frozen.
+scores, model weights and existing results are unchanged. The subsequent
+[49-frame combined-attention pair](VMEM_GENERATION_DEBUG.md#combined-attention-generation-check)
+passes as recorded above. The v3 manifest is now implemented; its source lock
+must be created on CECSL after testing and pulling the new implementation.
 
 ## 2026-09-23 Fixed-Input Reconstruction Result
 
@@ -29,8 +45,7 @@ See [the evidence and next control](VMEM_RECONSTRUCTION_PROBE.md).
 
 A subsequent math-attention probe passes as recorded above, and an opt-in
 generation hook is now implemented. There is still no new quality result or
-corrected 60-second rerun. The user's latest log reports the GPU probe, not
-the added CPU scope/restoration test results.
+corrected 60-second rerun. The later combined-control result is recorded above.
 
 ## 2026-09-23 Budget-Crossing Diagnostic
 

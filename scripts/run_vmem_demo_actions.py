@@ -275,7 +275,7 @@ def _generation_provenance(image_path: Path, config_path: Path) -> dict:
         "modeling/resource_audit.py", "scripts/vmem_protocol.py",
         "scripts/vmem_recovery.py",
         "frame_storage.py",
-        "generation_debug.py", "clip_attention.py",
+        "generation_debug.py", "generation_rng.py", "clip_attention.py",
         "modeling/modules/autoencoder.py", "modeling/modules/conditioner.py",
         "extern/CUT3R/surfel_inference.py", "extern/CUT3R/src/dust3r/inference.py",
         "extern/CUT3R/src/dust3r/blocks.py", "extern/CUT3R/src/dust3r/model.py",
@@ -374,12 +374,14 @@ def main() -> None:
         help="Interpolated frames per action. The Gradio demo uses 4.",
     )
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--rng-mode", choices=("legacy", "isolated"), default="legacy",
+                        help="Phase/action RNG isolation without diagnostic hashing; supports long runs and recovery.")
     parser.add_argument("--generation-debug", choices=("observe", "isolated"),
                         help="Short fresh-run fingerprints; isolated additionally uses phase/action RNG. Requires --checkpoint-every 0.")
     parser.add_argument("--clip-attention", choices=("native", "math"), default="native",
-                        help="CLIP-only attention dispatch; math currently requires a short --generation-debug run.")
+                        help="CLIP-only attention dispatch; math requires isolated RNG or a short debug run.")
     parser.add_argument("--cut3r-attention", choices=("native", "math"), default="native",
-                        help="CUT3R inference-only attention dispatch; math currently requires a short --generation-debug run.")
+                        help="CUT3R inference-only attention dispatch; math requires isolated RNG or a short debug run.")
     parser.add_argument(
         "--memory-policy",
         choices=MEMORY_POLICIES,
@@ -421,9 +423,9 @@ def main() -> None:
         )
     if args.num_actions <= 0:
         raise ValueError("--num-actions must be positive")
-    if args.generation_debug is not None or args.clip_attention != "native" or args.cut3r_attention != "native":
-        from generation_debug import validate_debug_args
-        validate_debug_args(args)
+    from generation_debug import validate_debug_args
+    from generation_rng import PhaseRNG, execution_settings
+    validate_debug_args(args)
     if args.profile_warmup_steps < 0:
         raise ValueError("--profile-warmup-steps must be nonnegative")
     if args.frames_per_action <= 0:
@@ -474,6 +476,7 @@ def main() -> None:
                     "frame_storage": args.frame_storage,
                     "clip_attention": args.clip_attention,
                     "cut3r_attention": args.cut3r_attention,
+                    "execution": execution_settings(vars(args)),
                 },
                 indent=2,
             )
@@ -506,6 +509,7 @@ def main() -> None:
     config = OmegaConf.load(args.config)
     config.model.clip_attention = args.clip_attention
     config.surfel.cut3r_attention = args.cut3r_attention
+    config.inference.rng_mode = args.rng_mode
     if args.inference_steps is not None:
         config.model.inference_num_steps = args.inference_steps
     if args.surfel_niter is not None:
@@ -520,6 +524,7 @@ def main() -> None:
     with (run_dir / "run_spec.json").open("w", encoding="utf-8") as handle:
         json.dump(_json_safe({
             "arguments": vars(args), "actions": actions, "provenance": provenance,
+            "execution": execution_settings(vars(args)),
             "torch_version": torch.__version__, "cuda_version": torch.version.cuda,
         }), handle, indent=2)
 
@@ -535,9 +540,15 @@ def main() -> None:
         debug = GenerationDebug(run_dir / "generation_debug.jsonl", seed=args.seed,
                                 mode=args.generation_debug, device=device, torch_module=torch)
         atomic_json(run_dir / "generation_environment.json", debug.environment())
-    with debug.phase("model_load", -1) if debug is not None else nullcontext():
+    control = debug
+    if control is None and args.rng_mode == "isolated":
+        from generation_debug import generation_environment
+        control = PhaseRNG(seed=args.seed, device=device, torch_module=torch)
+        atomic_json(run_dir / "generation_environment.json", generation_environment(torch, control.devices))
+    with control.phase("model_load", -1) if control is not None else nullcontext():
         pipeline = VMemPipeline(config, device)
     pipeline.generation_debug = debug
+    pipeline.generation_control = control
     runtime["pipeline"] = pipeline
     if device.type == "cuda":
         torch.cuda.synchronize(device)
@@ -547,6 +558,7 @@ def main() -> None:
     with (run_dir / "run_spec.json").open("w", encoding="utf-8") as handle:
         json.dump(_json_safe({
             "arguments": vars(args), "actions": actions, "provenance": provenance,
+            "execution": execution_settings(vars(args)),
             "torch_version": torch.__version__, "cuda_version": torch.version.cuda,
             "resource_schema": RESOURCE_SCHEMA if args.resource_trace else None,
         }), handle, indent=2)
@@ -609,7 +621,7 @@ def main() -> None:
         torch.cuda.synchronize(device)
     initialization_started = time.perf_counter()
     if args.resume_from is None:
-        with debug.phase("initialization", -1) if debug is not None else nullcontext():
+        with control.phase("initialization", -1) if control is not None else nullcontext():
             if debug is not None:
                 debug.record("initial_input", -1, image=initial_image, pose=initial_pose, K=initial_K)
             navigator.initialize(initial_image, initial_pose, initial_K)
@@ -718,6 +730,8 @@ def main() -> None:
         "generation_debug": args.generation_debug,
         "clip_attention": args.clip_attention,
         "cut3r_attention": args.cut3r_attention,
+        "rng_mode": args.rng_mode,
+        "execution": execution_settings(vars(args)),
         "provenance": provenance,
         "model_load_seconds": model_load_seconds,
         "initialization_seconds": initialization_seconds,
@@ -756,6 +770,7 @@ def main() -> None:
         "config_overrides": {
             "clip_attention": args.clip_attention,
             "cut3r_attention": args.cut3r_attention,
+            "rng_mode": args.rng_mode,
             "inference_steps": args.inference_steps,
             "surfel_niter": args.surfel_niter,
             "surfel_reconstruction_window": args.surfel_reconstruction_window,

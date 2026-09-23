@@ -13,6 +13,8 @@ from types import SimpleNamespace
 from run_vmem_demo_actions import _expand_trajectory_actions, _generation_provenance
 from run_vmem_demo_manifest import _load_manifest
 from vmem_protocol import commanded_path, expected_settings, verify_lock
+from generation_rng import EXECUTION_DEFAULTS, execution_settings
+from generation_debug import validate_debug_args
 
 
 def file_hash(path):
@@ -33,6 +35,10 @@ def freeze(args):
     paths = {}
     for i in range(0, len(rows), 2):
         left, right = [expected_settings(row) for row in rows[i:i + 2]]
+        for row, settings in zip(rows[i:i + 2], (left, right)):
+            if row.get("generation_debug") is not None:
+                raise ValueError("Cannot freeze debug hashing as a resource benchmark")
+            validate_debug_args(SimpleNamespace(**settings, generation_debug=None))
         ignored = {"run_id", "memory_policy", "memory_budget"}
         if ({k: v for k, v in left.items() if k not in ignored}
                 != {k: v for k, v in right.items() if k not in ignored}):
@@ -60,12 +66,13 @@ def freeze(args):
             "units": "Navigator units; not reconstructed coverage or meters",
         }
     first = _generation_provenance(Path(rows[0]["image"]), args.config)
-    lock = {"schema": "vmem_experiment_lock_v3", "manifest": str(args.manifest),
+    lock = {"schema": "vmem_experiment_lock_v4", "manifest": str(args.manifest),
             "manifest_sha256": file_hash(args.manifest), "config": str(args.config),
             "config_sha256": first["config_sha256"], "source_sha256": first["source_sha256"],
             "git_commit": first["git_commit"], "rows": rows,
             "image_sha256": {row["image"]: file_hash(row["image"]) for row in rows},
-            "path_validation": paths}
+            "path_validation": paths,
+            "execution": {row["run_id"]: execution_settings(row) for row in rows}}
     write_json(args.output, lock, exclusive=True)
     print(f"Frozen {len(rows)} runs in {args.output}; no models were loaded.")
     for case, details in paths.items():
@@ -289,6 +296,15 @@ def inspect_attempt(path, row, lock_path, lock):
         settings = expected_settings(row)
         if metadata.get("frame_storage", "legacy") != settings["frame_storage"]:
             raise ValueError("Metadata frame storage differs from frozen settings")
+        if lock.get("schema") == "vmem_experiment_lock_v4":
+            expected_execution = execution_settings(settings)
+            if spec.get("execution") != expected_execution or metadata.get("execution") != expected_execution:
+                raise ValueError("Execution provenance differs from frozen settings")
+            if metadata.get("generation_debug") is not None:
+                raise ValueError("Debug hashing is not permitted in benchmark runs")
+            for key in EXECUTION_DEFAULTS:
+                if metadata.get(key) != settings[key]:
+                    raise ValueError(f"Metadata mismatch: {key}")
         for key in ("run_id", "seed", "image", "trajectory", "fps", "step_size", "frames_per_action", "num_actions", "memory_policy", "memory_budget", "memory_scope"):
             if metadata.get(key) != settings[key]:
                 raise ValueError(f"Metadata mismatch: {key}")
@@ -306,6 +322,9 @@ def inspect_attempt(path, row, lock_path, lock):
         if settings["surfel_niter"] is not None:
             expected_config["surfel"]["niter"] = settings["surfel_niter"]
         expected_config["inference"]["visualize"] = settings["visualize_intermediates"]
+        for key, section in (("clip_attention", "model"), ("cut3r_attention", "surfel"), ("rng_mode", "inference")):
+            if key in spec["arguments"]:
+                expected_config[section][key] = settings[key]
         if normalized_config(path / "generation_config.yaml") != expected_config:
             raise ValueError("Effective generation config differs from frozen settings")
         actions = json.loads((path / "actions.json").read_text())

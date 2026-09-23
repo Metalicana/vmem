@@ -9,12 +9,21 @@ CUT3R reconstruction varied even without GeoCov, and the previous CLIP-only
 49-frame pair diverged before eviction. These observations do not explain the
 direction of the measured VBench deficit or establish an improvement.
 
-The generator now supports short, opt-in math attention for both encoders;
-native defaults and GeoCov scoring are unchanged. The next validation is the
-[combined-control 49-frame pair](VMEM_GENERATION_DEBUG.md#combined-attention-generation-check).
-It has not run yet. A versioned, resumable non-debug protocol is still needed
-before rerunning both 60-second arms. Old scores/locks remain historical records,
-and no remaining-suite launch is authorized by these diagnostic passes alone.
+The subsequent [combined-control 49-frame pair](VMEM_GENERATION_DEBUG.md#combined-attention-generation-check)
+passes: all 33 pre-eviction saved frames match exactly, no pre-eviction trace
+differences occur, and diffusion noise stays matched through all 12 actions.
+First reconstruction RNG divergence is step 8 and first output divergence is
+step 9, after eviction at step 7. Both arms retrieve legally. Final GeoCov live
+RGB/latent/embedding/intrinsic/depth counts are 32 each versus 49 for unbounded.
+
+[Transfer v3](VMEM_CONTROLLED_TRANSFER_V3.md) now promotes the same controls to
+normal generation without diagnostic hashing, with recovery and lock identity.
+It preserves v2's 15 cases, seeds, trajectories and controller, adding math
+attention for both encoders and phase/action RNG isolation in both arms. CPU
+tests and the new non-debug 60-second pair await user execution on CECSL; no
+local tests or experiments were run. Start with Oxford, regenerate both arms,
+and audit before expanding. Old quality results remain recorded; no quality
+improvement or explanation of their direction follows from these checks.
 
 ## 2026-09-21 Implementation Review
 

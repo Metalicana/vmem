@@ -11,7 +11,7 @@ TRAJECTORIES = (("pan_45", 0.1), ("pan_90", 0.1), ("out_and_back", 0.02))
 
 
 def build_rows(version="v1"):
-    if version not in {"v1", "v2"}:
+    if version not in {"v1", "v2", "v3"}:
         raise ValueError(f"Unknown transfer protocol: {version}")
     rows = []
     for scene_index, scene in enumerate(SCENES):
@@ -25,8 +25,11 @@ def build_rows(version="v1"):
                 "memory_scope": "surfel_indexed_view_memory",
                 "_case_id": case_id,
             }
-            if version == "v2":
+            if version in {"v2", "v3"}:
                 common["frame_storage"] = "resident"
+            if version == "v3":
+                common.update(rng_mode="isolated", clip_attention="math", cut3r_attention="math",
+                              checkpoint_every=5)
             rows.append({**common, "run_id": f"{case_id}_unbounded", "memory_policy": "unbounded"})
             rows.append({**common, "run_id": f"{case_id}_geocov32",
                          "memory_policy": "slam_covisibility", "memory_budget": 32})
@@ -35,7 +38,7 @@ def build_rows(version="v1"):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--version", choices=("v1", "v2"), default="v1")
+    parser.add_argument("--version", choices=("v1", "v2", "v3"), default="v1")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     rows = build_rows(args.version)

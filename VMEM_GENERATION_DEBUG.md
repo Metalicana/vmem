@@ -2,6 +2,25 @@
 
 ## Combined-Attention Generation Check
 
+**Completed on CECSL, 2026-09-23.** The user supplied both audits for
+`outputs/vmem_debug_combined_math_v1`. Settings/provenance match, with equal
+recorded environments. All 33 saved frames through frame 32 match exactly and
+there are no pre-eviction trace divergences. First eviction is step 7 after
+frame 32, evicting frame 3. First differing event is reconstruction end-state
+RNG at step 8; conditioning, diffusion latents and decoded output first differ
+at step 9. Initial and sampler noise remain identical across all 12 actions.
+The RNG difference at reconstruction exit does not leak into later diffusion.
+
+Both arms finish with 49 output frames, legal retrieval and four context slots
+after the initial step. GeoCov uses CLIP throughout, with zero latent fallback.
+It has 32 resident payloads per component versus 49 for unbounded, with no
+pending evictions. These are passed short-run control/residency checks, not
+a quality win or a full geometry-tensor equality test. Next use the
+[non-debug, resumable v3 pilot](VMEM_CONTROLLED_TRANSFER_V3.md).
+
+The diagnostic commands below document the completed short check; they are
+not another prerequisite before the v3 pilot.
+
 The user-run math CUT3R probe now passes exact preprocessing, prediction and
 aligned-output equality within and across two fresh processes. See
 [the completed results](VMEM_RECONSTRUCTION_PROBE.md#completed-math-probe-2026-09-23).
@@ -22,10 +41,11 @@ inputs, or skip surfel updates. Native/default callers retain native dispatch.
 The CPU tests exercise the actual function with neural calls stubbed, pipeline
 config forwarding, restoration and CLI/provenance guards; they await CECSL.
 
-Both math flags still require a fresh, unlocked 1-12 action debug run with
-checkpoints disabled. This is not yet the versioned, resumable 60-second protocol.
-After pushing/pulling, ask the user to run the full CPU suite in `vmem` and check
-GPU availability. No tests, dry runs, inference or SSH jobs are run on the Mac.
+Debug mode still requires a fresh, unlocked 1-12 action run with checkpoints
+disabled. Normal generation now accepts both math flags with `--rng-mode
+isolated` and supports long runs and recovery without hashing. After
+pushing/pulling, run the full CPU suite in `vmem` and check GPU availability.
+No tests, dry runs, inference or SSH jobs are run on the Mac.
 
 ```bash
 conda activate vmem
@@ -70,9 +90,9 @@ pre-eviction contexts, reconstruction inputs, geometry counts and saved pixels
 through frame 32, including generation on the first evicting action. Post-eviction
 conditioning/output differences are expected; whole-run event equality is not
 the acceptance criterion. Count equality alone is not proof of full geometry
-equality. If this passes, promote controls to a separately versioned non-debug
-runner/manifest with recovery identity and resume validation; then regenerate
-both 60-second arms. Preserve the original VBench scores and run artifacts.
+equality. This check has now passed; controls are promoted in v3 with recovery
+identity and CPU resume coverage awaiting CECSL. Regenerate both 60-second
+arms after tests pass. Preserve the original VBench scores and run artifacts.
 
 ## Earlier Checks
 
@@ -147,8 +167,9 @@ matching preprocessing/weights/RNG, within and across processes. All 16 original
 probe tests passed. Its subsequent math-profile probe now passes all three
 stages within/across processes; the integrated generation check is above.
 No 60-second corrected rerun has been supplied. Production RNG/attention
-settings, recovery compatibility and a new frozen protocol still need migration
-before a resumable long rerun. Old videos and quality results remain intact.
+settings and a new v3 protocol are now implemented as linked above; the new
+tests and long-run path await CECSL validation. Old videos and quality results
+remain intact.
 
 ## Implementation
 
