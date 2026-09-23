@@ -28,10 +28,17 @@ are identical with saved-file hashes verified. Geometry still differs after
 the first update (679 versus 678 surfels), without changing selected contexts.
 Existing phase-event fingerprints do not cover reconstruction outputs.
 See the [completed check](VMEM_CLIP_PROBE.md#completed-generation-check-2026-09-21)
-for earlier differing confidence-derived edge scores and the pending fixed-input
-reconstruction diagnostic. This does not identify a particular kernel defect
-or explain the long-run quality direction. Isolated-mode GPU validation remains
-pending; default RNG
+for earlier differing confidence-derived edge scores. The subsequent
+[fixed-input reconstruction probe](VMEM_RECONSTRUCTION_PROBE.md) now reproduces
+raw CUT3R prediction differences within/across processes, with matching inputs,
+weights, recorded environments and RNG. The user passed its 16 original tests.
+A probe-only math-attention control has been added but not yet run. This does
+not identify a particular kernel defect
+or explain the long-run quality direction. The subsequent
+[2026-09-23 budget-crossing check](VMEM_GENERATION_DEBUG.md#budget-crossing-result-2026-09-23)
+verifies matched diffusion noise through all 12 actions under isolated RNG,
+but still finds output divergence at frame 21 before eviction after frame 32.
+Final resident payload counts are all 32. Default RNG
 and native attention behavior are unchanged, but
 source hashes have changed. No old experiment lock or result was overwritten.
 

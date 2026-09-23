@@ -10,14 +10,23 @@ import numpy as np
 from PIL import Image
 
 from scripts.probe_vmem_reconstruction import (
-    SCHEMA, STAGES, array_difference, compare, compare_stage, digest_file,
-    first_action_poses, load_reference, load_report, observe_reconstruction, run,
+    SCHEMA, STAGES, array_difference, attention_state, compare, compare_stage, digest_file,
+    first_action_poses, load_reference, load_report, main, observe_reconstruction, run,
     snapshot, write_json,
 )
 
 
 ROOT = Path(__file__).resolve().parents[1]
 ARRAY_ONLY = SimpleNamespace(Tensor=type("UnusedTensor", (), {}))
+
+
+def attention_record(profile):
+    before = {"mha_fastpath": True, "flash_sdp": True, "memory_efficient_sdp": True,
+              "math_sdp": True, "cudnn_sdp": True}
+    active = before.copy() if profile == "native" else {
+        "mha_fastpath": False, "flash_sdp": False, "memory_efficient_sdp": False,
+        "math_sdp": True, "cudnn_sdp": False}
+    return {"profile": profile, "before": before, "active": active, "after": before.copy()}
 
 
 class ReconstructionProbeTest(unittest.TestCase):
@@ -47,7 +56,7 @@ class ReconstructionProbeTest(unittest.TestCase):
         write_json(path / "frame_manifest.json", {"schema": "vmem_output_frames_v1", "sha256": hashes})
         return path
 
-    def probe(self, name, *, changed_stage=None):
+    def probe(self, name, *, changed_stage=None, attention=None):
         path = self.root / name
         path.mkdir()
         repetitions = []
@@ -70,6 +79,10 @@ class ReconstructionProbeTest(unittest.TestCase):
                   "source_sha256": {"file": "same"}, "environment": {"test": True},
                   "reconstruction_environment": {"test": True},
                   "weights_unchanged": True, "repetitions": repetitions}
+        if attention is not None:
+            report["settings"]["prediction_attention"] = attention
+            for record in repetitions:
+                record["prediction_attention"] = attention_record(attention)
         write_json(path / "report.json", report)
         return path
 
@@ -228,6 +241,52 @@ class ReconstructionProbeTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "provenance"):
             compare(left, right)
 
+    def test_prediction_attention_mismatch_is_not_a_matched_control(self):
+        left = self.probe("left", attention="math")
+        right = self.probe("right", attention="math")
+        self.assertTrue(compare(left, right)["matched_control"])
+        native = self.probe("native", attention="native")
+        report = compare(native, right)
+        self.assertFalse(report["matched_control"])
+        self.assertFalse(report["settings_equal"])
+        self.assertEqual(report["prediction_attention"], ["native", "math"])
+        self.assertTrue(all(not row["prediction_attention_equal"] for row in report["comparisons"]))
+
+    def test_missing_or_unrestored_attention_record_is_rejected(self):
+        for case in ("missing", "wrong_active", "unrestored", "not_boolean"):
+            with self.subTest(case=case):
+                path = self.probe(case, attention="math")
+
+                def damage(report):
+                    trace = report["repetitions"][0]["prediction_attention"]
+                    if case == "missing":
+                        trace.pop("active")
+                    elif case == "wrong_active":
+                        trace["active"]["flash_sdp"] = True
+                    elif case == "unrestored":
+                        trace["after"]["mha_fastpath"] = False
+                    else:
+                        trace["active"]["math_sdp"] = 1
+
+                self.edit(path / "report.json", damage)
+                with self.assertRaisesRegex(ValueError, "attention"):
+                    load_report(path)
+
+    def test_unknown_attention_is_rejected_before_loading_inputs(self):
+        with patch("scripts.probe_vmem_reconstruction.load_reference") as load:
+            with self.assertRaisesRegex(ValueError, "Unknown prediction attention"):
+                run(SimpleNamespace(attention="invalid"))
+            load.assert_not_called()
+
+    def test_cli_attention_is_opt_in_and_passed_to_runner(self):
+        for profile in (None, "math"):
+            argv = ["probe", "run", "--reference-run", "reference", "--output", "probe"]
+            if profile is not None:
+                argv.extend(["--attention", profile])
+            with patch("sys.argv", argv), patch("scripts.probe_vmem_reconstruction.run") as launch:
+                main()
+            self.assertEqual(launch.call_args.args[0].attention, profile or "native")
+
     def test_observation_preserves_objects_and_restores_functions_on_failure(self):
         views = [{"img": np.ones((1, 3, 2, 2))}]
         predictions = [{"conf": np.ones((2, 2))}]
@@ -295,6 +354,86 @@ class ReconstructionProbeTest(unittest.TestCase):
         np.testing.assert_allclose(poses[-1], expected, rtol=0, atol=1e-7)
         with self.assertRaisesRegex(ValueError, "endpoint"):
             first_action_poses(runner, spec, {"action": "left5", "current_pose": np.eye(4).tolist()})
+
+
+class ReconstructionAttentionTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import torch
+        except ImportError:
+            raise unittest.SkipTest("CPU PyTorch is required")
+        cls.torch = torch
+
+    def exercise(self, profile, fail=None):
+        torch = self.torch
+        before, rng = attention_state(torch), torch.get_rng_state().clone()
+        precision = (torch.backends.cuda.matmul.allow_tf32, torch.get_float32_matmul_precision())
+        active = before if profile == "native" else attention_record("math")["active"]
+        visited, trace = [], {}
+        views, predictions = [object()], [object()]
+        result = {key: object() for key in ("point_clouds", "depths", "confidences", "camera_info")}
+
+        def check(stage, expected):
+            visited.append(stage)
+            self.assertEqual(attention_state(torch), expected)
+            self.assertFalse(torch.is_grad_enabled())
+            self.assertTrue(torch.is_autocast_enabled("cpu"))
+            if stage == fail:
+                raise RuntimeError("injected failure")
+
+        def prepare():
+            check("preprocessing", before)
+            return views
+
+        def infer():
+            check("inference", active)
+            return {"pred": predictions}, None
+
+        def align():
+            check("alignment", before)
+            return result
+
+        def capture(stage, value):
+            check("capture_" + stage, before)
+            if stage == "predictions":
+                self.assertIs(value, predictions)
+
+        reconstruction = SimpleNamespace(prepare_input_from_pil=prepare, prepare_output=align)
+        inference_module = SimpleNamespace(inference=infer)
+
+        def actual_call(images, model, **kwargs):
+            self.assertIs(reconstruction.prepare_input_from_pil(), views)
+            self.assertIs(inference_module.inference()[0]["pred"], predictions)
+            return reconstruction.prepare_output()
+
+        reconstruction.run_inference_from_pil = actual_call
+        debug = SimpleNamespace(rng_state=lambda: "same", fingerprint=lambda value: value)
+        try:
+            with torch.no_grad(), torch.autocast("cpu"):
+                observe_reconstruction(reconstruction, inference_module, object(), ["image"],
+                                       poses=np.eye(4), lr=.01, niter=400, device="cpu", capture=capture,
+                                       debug=debug, attention=profile, torch_module=torch, attention_trace=trace)
+        finally:
+            self.assertEqual(attention_state(torch), before)
+            self.assertTrue(torch.equal(torch.get_rng_state(), rng))
+            self.assertEqual(precision, (torch.backends.cuda.matmul.allow_tf32, torch.get_float32_matmul_precision()))
+            self.assertEqual(trace, {"profile": profile, "before": before, "active": active, "after": before})
+            self.assertIs(reconstruction.prepare_input_from_pil, prepare)
+            self.assertIs(reconstruction.prepare_output, align)
+            self.assertIs(inference_module.inference, infer)
+        self.assertEqual(visited, ["preprocessing", "capture_preprocessed", "inference", "capture_predictions",
+                                   "alignment", "capture_aligned"])
+
+    def test_profile_is_scoped_to_inference_without_rng_or_precision_changes(self):
+        for profile in ("native", "math"):
+            with self.subTest(profile=profile):
+                self.exercise(profile)
+
+    def test_profile_and_wrappers_restore_after_inference_capture_or_alignment_failure(self):
+        for fail in ("inference", "capture_predictions", "alignment"):
+            with self.subTest(fail=fail), self.assertRaisesRegex(RuntimeError, "injected failure"):
+                self.exercise("math", fail=fail)
 
 
 if __name__ == "__main__":

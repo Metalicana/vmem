@@ -8,7 +8,7 @@ outliers, not proof of a different noise sample, a specific nondeterministic
 kernel, or a GeoCov defect. Eviction only happens after frame 32. The later
 negative VBench results remain recorded.
 
-**Current result:** the user completed the standalone CLIP probes and the
+**Earlier result (2026-09-21):** the user completed the standalone CLIP probes and the
 two-action `math`/`observe` full-generator triplet. Both unbounded-repeat and
 unbounded/GeoCov comparisons have identical recorded generation events; the
 unbounded/GeoCov audit also verifies identical decoded pixels in all nine
@@ -16,6 +16,62 @@ frames. Geometry still differs after the first update (679 versus 678 surfels),
 despite matching selected contexts. See the [measured results](VMEM_CLIP_PROBE.md#completed-generation-check-2026-09-21).
 This is a passed short generation-output check, not a passed geometry or
 post-eviction check. Completed triplet commands below are historical.
+
+## Budget-Crossing Result, 2026-09-23
+
+The user supplied completed CECSL comparisons for the 12-action runs under
+`outputs/vmem_debug_post_eviction_v1`:
+
+- Unbounded: `post_eviction_unbounded_pan_45_A12_unbounded_20260922_205407`.
+- GeoCov-32: `post_eviction_geocov32_pan_45_A12_slam_covisibility_B32_20260922_205958`.
+
+Both used math CLIP and isolated phase/action RNG. The comparer reports no
+settings/provenance mismatches or missing provenance, and equal recorded
+environments. Its completeness checks passed. No initial-noise or sampler-noise
+event differs across all 12 actions. Reconstruction end-state RNG first differs
+at step 8, while subsequent diffusion noise remains equal: isolation works in
+this GPU check despite differing reconstruction draw counts.
+
+The pre-eviction output check does not pass. The first differing recorded
+generation event is conditioning at zero-based step 5 (action 6), in `c`, `uc`
+and `c2w`; diffusion latents and decoded samples then differ at that same step.
+The first differing saved image is frame 21, with channel MAE 7.908666, RMSE
+18.162395 and maximum 177 in 0-255 units; 98.6684% of pixels change. Frames
+0-20 match. This is substantial paired-output divergence, not a quality score
+or evidence of which video is better. First eviction is later, at step 7 after
+frame 32 is generated, removing frame 3. The audit also flags pre-eviction
+context and geometry differences. The supplied excerpt does not contain their
+exact first-step records.
+
+Both arms have no illegal retrieval selections, retain the initial frame in
+the eligible bank, and use four context slots after the first step. Both use
+the retrieval fallback at step 1. GeoCov descriptors are CLIP throughout, with
+zero latent fallback. Descriptor counts of 33/36 describe the prospective
+scoring bank before eviction, not a violation of the post-update B=32 cap.
+Final GeoCov metadata reports 49 output/durable frames, exactly 32 resident
+entries in each of RGB, latent, embedding, intrinsic and depth storage, owned
+array storage, and no pending evictions. The payload logical-byte sum is
+59,739,264, not total process RAM/VRAM. This log check does not independently
+decode the MP4 or validate every resource snapshot.
+
+Thus the noise-isolation and final-payload checks pass; pre-eviction
+repeatability remains unresolved. Actual eviction cannot explain divergence
+that precedes it. Static review finds scoring reads features without mutating
+them and pruning/release is conditional on actual eviction. Earlier same-policy
+repeat geometry differences make reconstruction variability a plausible source,
+not a proven cause of the frame-21 change or the old VBench deficit.
+
+Do not change GeoCov coefficients or call the quality issue fixed. The existing
+[fixed-input reconstruction probe](VMEM_RECONSTRUCTION_PROBE.md) can now reuse
+the saved unbounded frames above, without regenerating a video. It separates
+preprocessing, raw CUT3R predictions and aligned outputs; a passing standalone
+probe would not rule out full-process or surfel-merging effects. The subsequent
+user-run native probe now reproduces variation in raw CUT3R predictions, with
+matching preprocessing/weights/RNG, within and across processes. All 16 original
+probe tests passed. See its report and probe-only math control in the linked
+document. No 60-second corrected rerun has been supplied. Production RNG/attention
+settings, recovery compatibility and a new frozen protocol still need migration
+before a resumable long rerun. Old videos and quality results remain intact.
 
 ## Implementation
 
@@ -80,9 +136,10 @@ earliest difference in A/B and A/C: `initial_encoding.embeddings`, step -1.
 The recorded input, VAE latent, RNG states and all diffusion/sampler noise match;
 conditioning and generated values subsequently differ. Listed provenance and
 environments match. This identifies the initial image-encoder path, not a
-policy-specific eviction defect. The nine-frame pixel comparison and isolated
-GPU mode remain unreported. The subsequent [encoder-only probe](VMEM_CLIP_PROBE.md)
-is complete; its stable math profile motivates the new full-pipeline gate above.
+policy-specific eviction defect. At that stage the nine-frame pixel comparison
+and isolated GPU mode were unreported; the subsequent math-profile and
+budget-crossing results are recorded above. The [encoder-only probe](VMEM_CLIP_PROBE.md)
+is complete; its stable math profile motivated the full-pipeline checks.
 
 The user ran the full suite in the CECSL `vmem` environment on 2026-09-21:
 122 tests reported, 119 passed, three VBench video-writer encoding tests skipped
@@ -153,9 +210,10 @@ and check reported settings/provenance/environment differences.
 The math/observe generation-output gate has passed for the supplied nine-frame
 comparison. Investigate the remaining geometry variation with fixed inputs;
 do not require regenerating the same videos just to inspect reconstruction.
-A predefined short B=32 control crossing the eviction boundary still needs
-isolated phase RNG to verify matched diffusion noise after reconstruction sizes
-diverge. No remaining-suite launch or scoring-rule tuning follows from the
-short result. Promoting the RNG change to the benchmark requires a new version,
+A predefined short B=32 control crossing the eviction boundary now verifies
+matched diffusion noise after reconstruction sizes diverge, but still has
+pre-eviction output divergence (see the 2026-09-23 result above). No
+remaining-suite launch or scoring-rule tuning follows from this result.
+Promoting the RNG change to the benchmark requires a new version,
 lock, both arms and recovery validation; this debug implementation does not
 perform that migration.

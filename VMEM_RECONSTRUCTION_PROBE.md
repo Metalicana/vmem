@@ -1,5 +1,90 @@
 # Fixed-Input Reconstruction Probe
 
+## Completed Native Probe, 2026-09-23
+
+The user ran all 16 original probe tests successfully on CECSL, then ran two
+fresh probe processes under `outputs/vmem_reconstruction_post_eviction_v1/a`
+and `b`, each reconstructing the same five saved frames twice. The reference
+was `outputs/vmem_debug_post_eviction_v1/` followed by
+`post_eviction_unbounded_pan_45_A12_unbounded_20260922_205407`.
+
+The supplied comparison reports `matched_control: true`: input records,
+settings, loaded weights, recorded sources/environments and RNG states match.
+Both ambient environments match the reference run and loaded weights remain
+unchanged. Within each process and across both processes:
+
+| Stage | Outcome |
+|---|---|
+| Preprocessed views | All 40 arrays match |
+| Raw CUT3R predictions | 24 of 30 arrays differ |
+| Aligned reconstruction | 16 of 19 arrays differ |
+
+The first differing prediction field in traversal order is view 1's
+`camera_pose` (seven float32 values). Across processes its maximum absolute
+difference is about 3.49e-6 for repeat 0 and 1.41e-5 for repeat 1. The first
+reported aligned difference is focal length, with maxima about 0.0895 and
+0.1210 in that field's units. These are not maxima over all prediction arrays,
+video errors, quality metrics, or proof of the first internal layer to diverge.
+
+This reproduces variability in raw CUT3R inference on fixed inputs, before
+alignment or surfel construction. No GeoCov scoring/eviction runs in the probe.
+It does not identify a specific kernel, establish that alignment is itself
+repeatable with fixed predictions, or explain the direction of the old VBench
+gap. The generation-level frame-21 divergence remains a separate observation.
+
+## Math-Attention Control
+
+The probe now accepts `--attention native|math`, with `native` unchanged by
+default. The math control reuses the scoped attention helper used by the CLIP
+probe, but applies it to the CUT3R inference call only: it disables the MHA
+fast path and allows only math SDPA. CUT3R self/cross-attention directly calls
+SDPA in `extern/CUT3R/src/dust3r/blocks.py`. This control does not establish that
+either fast path is defective. It does not change dtype, autocast, TF32,
+weights, poses, alignment settings, GeoCov, or the production generation path.
+
+Each repetition records attention flags before/during/after inference. Backend
+state is restored before prediction capture and alignment, even on inference
+failure. New reports are rejected if these records are missing, disagree with
+the requested profile, or show unrestored flags. Comparison includes the
+profile/flags; old native reports remain readable. Source hashes now include
+the shared attention helper. `environment_matches_reference` describes ambient
+state, not equality of the deliberately overridden inference dispatch.
+
+After pushing/pulling, run the updated CPU tests in `vmem`, then check current
+GPU availability. The previous 16-test pass predates the new control tests;
+no new tests or experiments have been run on the Mac.
+
+```bash
+conda activate vmem
+CUDA_VISIBLE_DEVICES="" python -m unittest discover -s tests -p 'test_reconstruction_probe.py' -v
+nvidia-smi
+```
+
+If tests pass and GPU 1 is available, use two fresh math-profile processes.
+The native results above are preserved; no existing output is overwritten.
+
+```bash
+GPU=1
+REF=outputs/vmem_debug_post_eviction_v1/post_eviction_unbounded_pan_45_A12_unbounded_20260922_205407
+OUT=outputs/vmem_reconstruction_math_v1
+for REP in a b; do
+  CUDA_VISIBLE_DEVICES="$GPU" python -u scripts/probe_vmem_reconstruction.py run \
+    --reference-run "$REF" --attention math --output "$OUT/$REP" || break
+done
+python scripts/probe_vmem_reconstruction.py compare \
+  --left "$OUT/a" --right "$OUT/b" | tee "$OUT/comparison.json"
+```
+
+Inspect both within-process reports and the cross-process comparison. A stable
+math probe would support this execution profile on these inputs, not universal
+determinism or improved video quality. If predictions match but alignment still
+varies, distinguish those outcomes. If predictions still vary, attention alone
+has not resolved the issue; do not change pruning thresholds to hide it.
+Directly comparing native and math probes is an intentional settings mismatch,
+not a same-settings repeatability test. The existing native reports also have
+older probe source hashes. Full-generation validation and versioned production
+integration remain necessary before claiming a corrected long-video comparison.
+
 ## Why This Check
 
 The CLIP-only math control passes the supplied nine-frame generation check:
@@ -53,8 +138,9 @@ and are not accepted by `compare`; existing outputs cannot be overwritten.
 
 ## CECSL Commands
 
-No tests or experiments were run on the Mac. After pushing/pulling, first run
-the new CPU tests in the generation environment:
+These are the original native-probe commands; use the math-control commands
+above for the next check. No tests or experiments were run on the Mac. The
+user's 16-test CECSL pass applies to the original implementation:
 
 ```bash
 conda activate vmem
@@ -100,6 +186,8 @@ Differences there limit how closely the probe represents the original run.
   Full-process history and surfel construction/merging remain possible locations;
   do not claim the original geometry discrepancy has been fixed.
 
-After this investigation, the separately planned budget-crossing control still
-needs isolated diffusion RNG. No 60-second rerun, new benchmark protocol or
-quality-improvement claim follows automatically from a stable short probe.
+The completed budget-crossing control verifies isolated diffusion noise but
+still diverges in context/output before eviction; see
+[the recorded result](VMEM_GENERATION_DEBUG.md#budget-crossing-result-2026-09-23).
+No 60-second rerun, new benchmark protocol or quality-improvement claim follows
+automatically from a stable short probe.

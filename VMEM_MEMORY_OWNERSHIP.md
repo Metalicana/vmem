@@ -1,5 +1,38 @@
 # VMem Memory Ownership and Measurement Audit
 
+## 2026-09-23 Fixed-Input Reconstruction Result
+
+The user passed all 16 original reconstruction-probe tests and completed two
+fresh CECSL processes, each repeating fixed-input CUT3R reconstruction twice.
+Matched inputs, settings, loaded weights, recorded environments and RNG states
+produce identical preprocessing but differing raw predictions (24/30 arrays)
+and aligned outputs (16/19 arrays), within and across processes. This reproduces
+an inference-stage variability source without GeoCov, before alignment or surfel
+merging. It does not identify a kernel or explain the VBench quality direction.
+See [the evidence and next control](VMEM_RECONSTRUCTION_PROBE.md).
+
+A probe-only math-attention option now scopes dispatch to CUT3R inference and
+restores it before alignment. Added scope/restoration/provenance tests and the
+GPU control await CECSL execution. Production generation and GeoCov scoring
+are unchanged; there is no new quality result or corrected 60-second rerun.
+
+## 2026-09-23 Budget-Crossing Diagnostic
+
+The user completed the math-CLIP/isolated-RNG 12-action pair on CECSL. All
+recorded initial and sampler diffusion noise matches, including after eviction;
+the final GeoCov metadata reports 49 durable frames and exactly 32 resident RGB,
+latent, embedding, intrinsic and depth payloads, with owned arrays and no pending
+evictions. The pre-eviction output check still fails: conditioning first differs
+at step 5, and frame 21 is the first unequal decoded image, before first eviction
+at step 7 after frame 32. Both arms retrieve only eligible frames. See the
+[full result and limits](VMEM_GENERATION_DEBUG.md#budget-crossing-result-2026-09-23).
+
+This validates the tested noise isolation and final residency, not improved
+quality or deterministic geometry. The fixed-input reconstruction probe has
+since reused these saved images; its result is recorded above. GeoCov
+scoring and the old VBench measurements are unchanged. No local experiments
+were run, and no new long-generation protocol has been frozen.
+
 ## 2026-09-21 Quality-Drop Review
 
 The complete user-supplied Oxford quality table favors unbounded on five
@@ -31,11 +64,11 @@ frames have hash-verified identical decoded pixels. Geometry still differs
 (679 versus 678 surfels after the first update), while selected contexts and
 reconstruction input indices match. Debug phase RNG hashes do not hash geometry.
 See the [measured results and reconstruction follow-up](VMEM_CLIP_PROBE.md#completed-generation-check-2026-09-21).
-The particular kernel cause, long-run quality impact, and isolated-mode
-post-eviction GPU behavior remain unresolved.
+The particular kernel cause and long-run quality impact remain unresolved;
+isolated-mode post-eviction GPU results are now recorded in the update above.
 A [fixed-input reconstruction probe](VMEM_RECONSTRUCTION_PROBE.md) is now
 available to localize the remaining variation without generating more video.
-It loads only CUT3R weights; CPU tests and GPU validation await CECSL execution.
+It loads only CUT3R weights; original CPU/GPU results are now recorded above.
 These changes do not change the old videos or GeoCov
 scores. Default RNG behavior is unchanged; source hashes are new.
 
