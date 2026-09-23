@@ -41,6 +41,7 @@ from modeling.sampling import DDPMDiscretization, DiscreteDenoiser, create_sampl
 from modeling.modules.conditioner import CLIPConditioner
 from modeling.resource_audit import profiled_phase
 from frame_storage import owned_frame_array
+from clip_attention import attention_profile
 from utils import (encode_vae_image, 
                    encode_image, 
                    visualize_depth, 
@@ -61,6 +62,8 @@ ImgNorm = tvf.Compose([tvf.ToTensor(), tvf.Normalize((0.5, 0.5, 0.5), (0.5, 0.5,
 class VMemPipeline:
     def __init__(self, config, device="cpu", dtype=torch.float32):
         self.config = config
+        if config.surfel.get("cut3r_attention", "native") not in ("native", "math"):
+            raise ValueError("Unknown CUT3R attention profile")
         
         model_path = self.config.model.get("model_path", None)
 
@@ -1551,6 +1554,9 @@ class VMemPipeline:
             niter = niter,
             visualize=self.config.inference.visualize_pointcloud,
             device=device,
+            inference_context=attention_profile(
+                self.config.surfel.get("cut3r_attention", "native"), torch
+            ),
         )
 
         # Extract outputs

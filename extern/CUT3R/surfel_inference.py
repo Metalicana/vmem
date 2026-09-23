@@ -27,6 +27,7 @@ import argparse
 import tempfile
 import shutil
 from copy import deepcopy
+from contextlib import nullcontext
 from add_ckpt_path import add_path_to_dust3r
 import imageio.v2 as iio
 
@@ -299,7 +300,8 @@ def run_inference_from_pil(
     output_dir="./demo_tmp", 
     visualize=False, 
     vis_threshold=1.5,
-    save_flag=False
+    save_flag=False,
+    inference_context=None,
 ):
     """
     Run 3D reconstruction from a list of PIL images.
@@ -313,6 +315,8 @@ def run_inference_from_pil(
         output_dir (str): Directory to save outputs.
         visualize (bool): Whether to launch the point cloud viewer.
         vis_threshold (float): Visualization threshold for point cloud viewer.
+        inference_context: Optional context manager scoped to model inference,
+            restored before collation and global alignment.
         
     Returns:
         dict: A dictionary containing the reconstruction results:
@@ -353,7 +357,8 @@ def run_inference_from_pil(
     }
     edges = []
 
-    outputs, state_args = inference(views, model, device)
+    with inference_context if inference_context is not None else nullcontext():
+        outputs, state_args = inference(views, model, device)
     for view_id in range(1, len(outputs["views"])):
         output["view1"].append(outputs["views"][0])
         output["view2"].append(outputs["views"][view_id])
@@ -524,7 +529,6 @@ def prepare_input_from_pil(
         views.append(view)
     
     return views
-
 
 
 

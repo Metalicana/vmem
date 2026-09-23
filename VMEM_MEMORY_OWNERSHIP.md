@@ -1,5 +1,21 @@
 # VMem Memory Ownership and Measurement Audit
 
+## 2026-09-23 Math Reconstruction Pass
+
+The user-run math-attention CUT3R probe now matches all preprocessing (40),
+prediction (30) and aligned-output (19) arrays exactly, within and across two
+processes. The recorded controls, RNG, attention flags and weight checks pass.
+This is a repeatability result for the tested five images, not a video-quality
+result or a universal determinism guarantee.
+
+The generation runner now has opt-in `--cut3r-attention math`, scoped to CUT3R
+inference and restored before alignment. Its default is still native. GeoCov
+scores, model weights and existing results are unchanged. The next step is the
+[49-frame combined-attention pair](VMEM_GENERATION_DEBUG.md#combined-attention-generation-check),
+with math CLIP and isolated phase RNG as well. Integration tests and this new
+video pair await CECSL execution; no tests or experiments were run locally.
+The corrected resumable 60-second protocol is not yet frozen.
+
 ## 2026-09-23 Fixed-Input Reconstruction Result
 
 The user passed all 16 original reconstruction-probe tests and completed two
@@ -11,10 +27,10 @@ an inference-stage variability source without GeoCov, before alignment or surfel
 merging. It does not identify a kernel or explain the VBench quality direction.
 See [the evidence and next control](VMEM_RECONSTRUCTION_PROBE.md).
 
-A probe-only math-attention option now scopes dispatch to CUT3R inference and
-restores it before alignment. Added scope/restoration/provenance tests and the
-GPU control await CECSL execution. Production generation and GeoCov scoring
-are unchanged; there is no new quality result or corrected 60-second rerun.
+A subsequent math-attention probe passes as recorded above, and an opt-in
+generation hook is now implemented. There is still no new quality result or
+corrected 60-second rerun. The user's latest log reports the GPU probe, not
+the added CPU scope/restoration test results.
 
 ## 2026-09-23 Budget-Crossing Diagnostic
 

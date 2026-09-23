@@ -26,8 +26,9 @@ def phase_seed(seed, phase, step):
 
 
 def validate_debug_args(args):
-    if getattr(args, "clip_attention", "native") != "native" and args.generation_debug is None:
-        raise ValueError("--clip-attention math currently requires a short --generation-debug run")
+    for name in ("clip_attention", "cut3r_attention"):
+        if getattr(args, name, "native") != "native" and args.generation_debug is None:
+            raise ValueError(f"--{name.replace('_', '-')} math currently requires a short --generation-debug run")
     if args.generation_debug is None:
         return
     if args.experiment_lock or args.resume_from or args.checkpoint_every:

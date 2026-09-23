@@ -1,5 +1,21 @@
 # VMem External Transfer: Audit and MemCam Handoff
 
+## 2026-09-23 Execution-Control Update
+
+Short CECSL checks now establish matched diffusion noise through eviction with
+phase/action RNG isolation, stable math-profile CLIP encoding, and stable
+fixed-input CUT3R predictions/alignment with math-profile attention. Native
+CUT3R reconstruction varied even without GeoCov, and the previous CLIP-only
+49-frame pair diverged before eviction. These observations do not explain the
+direction of the measured VBench deficit or establish an improvement.
+
+The generator now supports short, opt-in math attention for both encoders;
+native defaults and GeoCov scoring are unchanged. The next validation is the
+[combined-control 49-frame pair](VMEM_GENERATION_DEBUG.md#combined-attention-generation-check).
+It has not run yet. A versioned, resumable non-debug protocol is still needed
+before rerunning both 60-second arms. Old scores/locks remain historical records,
+and no remaining-suite launch is authorized by these diagnostic passes alone.
+
 ## 2026-09-21 Implementation Review
 
 A subsequent complete user-supplied VBench-Long table has five lower
@@ -38,7 +54,7 @@ frames match with saved PNG hashes verified. Geometry does not match (679 versus
 678 surfels after the first update); selected contexts still match. These debug
 events do not hash geometry outputs. See the [completed check and limits](VMEM_CLIP_PROBE.md#completed-generation-check-2026-09-21).
 The particular kernel cause and long-run quality impact remain unresolved;
-isolated-mode GPU validation after eviction also remains pending.
+subsequent isolated-mode and reconstruction probe results are recorded above.
 Default behavior and scoring are unchanged, but
 source hashes have changed. Preserve the old lock/results. No controller
 improvement is implied by the diagnostic or by passing CPU tests.

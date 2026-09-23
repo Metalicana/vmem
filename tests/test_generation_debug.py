@@ -54,11 +54,31 @@ class DebugContractTest(unittest.TestCase):
                     self.assertEqual(json.loads(output.getvalue())["clip_attention"], profile)
             load_runtime.assert_not_called()
 
+    def test_math_cut3r_requires_short_fresh_debug_before_runtime_load(self):
+        from scripts import run_vmem_demo_actions as runner
+        base = ["runner", "--image", "test_samples/oxford.jpg", "--dry-run", "--cut3r-attention", "math"]
+        debug = ["--generation-debug", "isolated", "--checkpoint-every", "0", "--num-actions", "12"]
+        invalid = [[], debug + ["--experiment-lock", "old.json"],
+                   debug + ["--resume-from", "old-run"], debug + ["--checkpoint-every", "5"],
+                   debug + ["--num-actions", "195"], debug + ["--frames-per-action", "8"]]
+        with patch.object(runner, "_load_runtime_dependencies") as load_runtime:
+            for extra in invalid:
+                with self.subTest(extra=extra), patch("sys.argv", base + extra), self.assertRaises(ValueError):
+                    runner.main()
+            for profile in ("native", "math"):
+                argv = base + debug + ["--cut3r-attention", profile, "--clip-attention", "math"]
+                with patch("sys.argv", argv), patch("sys.stdout", new_callable=io.StringIO) as output:
+                    runner.main()
+                    record = json.loads(output.getvalue())
+                    self.assertEqual(record["cut3r_attention"], profile)
+                    self.assertEqual(record["clip_attention"], "math")
+            load_runtime.assert_not_called()
+
     def test_modified_production_hooks_compile_without_importing_models(self):
         for relative in ("generation_debug.py", "utils/util.py", "modeling/pipeline.py",
                          "modeling/sampling.py", "scripts/run_vmem_demo_actions.py",
                          "scripts/audit_vmem_generation_debug.py", "clip_attention.py",
-                         "modeling/modules/conditioner.py"):
+                         "modeling/modules/conditioner.py", "extern/CUT3R/surfel_inference.py"):
             with self.subTest(file=relative):
                 compile((ROOT / relative).read_text(), relative, "exec")
         tree = ast.parse((ROOT / "utils/util.py").read_text())
@@ -113,6 +133,18 @@ class DebugComparisonTest(unittest.TestCase):
             self.assertEqual(report["clip_attention"], ["native", profile])
             self.assertEqual(report["settings_mismatches"],
                              [] if profile == "native" else ["arguments.clip_attention"])
+            self.assertEqual(report["missing_provenance"], [])
+
+    def test_cut3r_profile_is_compared_with_legacy_native_default(self):
+        path = self.right / "run_spec.json"
+        spec = json.loads(path.read_text())
+        for profile in ("native", "math"):
+            spec["arguments"]["cut3r_attention"] = profile
+            path.write_text(json.dumps(spec))
+            report = compare(self.left, self.right)
+            self.assertEqual(report["cut3r_attention"], ["native", profile])
+            self.assertEqual(report["settings_mismatches"],
+                             [] if profile == "native" else ["arguments.cut3r_attention"])
             self.assertEqual(report["missing_provenance"], [])
 
     def test_reports_first_sampler_noise_difference(self):

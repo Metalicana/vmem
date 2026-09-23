@@ -32,9 +32,11 @@ for earlier differing confidence-derived edge scores. The subsequent
 [fixed-input reconstruction probe](VMEM_RECONSTRUCTION_PROBE.md) now reproduces
 raw CUT3R prediction differences within/across processes, with matching inputs,
 weights, recorded environments and RNG. The user passed its 16 original tests.
-A probe-only math-attention control has been added but not yet run. This does
-not identify a particular kernel defect
-or explain the long-run quality direction. The subsequent
+A subsequent math-attention probe matches all preprocessing, prediction and
+aligned-output arrays within/across two processes. An opt-in inference-only
+generation hook is implemented; full-generation validation with both math
+controls is pending. This does not identify a particular kernel defect or
+explain the long-run quality direction. The earlier
 [2026-09-23 budget-crossing check](VMEM_GENERATION_DEBUG.md#budget-crossing-result-2026-09-23)
 verifies matched diffusion noise through all 12 actions under isolated RNG,
 but still finds output divergence at frame 21 before eviction after frame 32.

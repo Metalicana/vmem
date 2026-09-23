@@ -277,6 +277,8 @@ def _generation_provenance(image_path: Path, config_path: Path) -> dict:
         "frame_storage.py",
         "generation_debug.py", "clip_attention.py",
         "modeling/modules/autoencoder.py", "modeling/modules/conditioner.py",
+        "extern/CUT3R/surfel_inference.py", "extern/CUT3R/src/dust3r/inference.py",
+        "extern/CUT3R/src/dust3r/blocks.py", "extern/CUT3R/src/dust3r/model.py",
     )
     try:
         commit = subprocess.check_output(
@@ -376,6 +378,8 @@ def main() -> None:
                         help="Short fresh-run fingerprints; isolated additionally uses phase/action RNG. Requires --checkpoint-every 0.")
     parser.add_argument("--clip-attention", choices=("native", "math"), default="native",
                         help="CLIP-only attention dispatch; math currently requires a short --generation-debug run.")
+    parser.add_argument("--cut3r-attention", choices=("native", "math"), default="native",
+                        help="CUT3R inference-only attention dispatch; math currently requires a short --generation-debug run.")
     parser.add_argument(
         "--memory-policy",
         choices=MEMORY_POLICIES,
@@ -417,7 +421,7 @@ def main() -> None:
         )
     if args.num_actions <= 0:
         raise ValueError("--num-actions must be positive")
-    if args.generation_debug is not None or args.clip_attention != "native":
+    if args.generation_debug is not None or args.clip_attention != "native" or args.cut3r_attention != "native":
         from generation_debug import validate_debug_args
         validate_debug_args(args)
     if args.profile_warmup_steps < 0:
@@ -469,6 +473,7 @@ def main() -> None:
                     "memory_budget": args.memory_budget,
                     "frame_storage": args.frame_storage,
                     "clip_attention": args.clip_attention,
+                    "cut3r_attention": args.cut3r_attention,
                 },
                 indent=2,
             )
@@ -500,6 +505,7 @@ def main() -> None:
 
     config = OmegaConf.load(args.config)
     config.model.clip_attention = args.clip_attention
+    config.surfel.cut3r_attention = args.cut3r_attention
     if args.inference_steps is not None:
         config.model.inference_num_steps = args.inference_steps
     if args.surfel_niter is not None:
@@ -711,6 +717,7 @@ def main() -> None:
         "seed": args.seed,
         "generation_debug": args.generation_debug,
         "clip_attention": args.clip_attention,
+        "cut3r_attention": args.cut3r_attention,
         "provenance": provenance,
         "model_load_seconds": model_load_seconds,
         "initialization_seconds": initialization_seconds,
@@ -748,6 +755,7 @@ def main() -> None:
         "memory_trace": memory_trace_path,
         "config_overrides": {
             "clip_attention": args.clip_attention,
+            "cut3r_attention": args.cut3r_attention,
             "inference_steps": args.inference_steps,
             "surfel_niter": args.surfel_niter,
             "surfel_reconstruction_window": args.surfel_reconstruction_window,

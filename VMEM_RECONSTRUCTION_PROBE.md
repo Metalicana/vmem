@@ -1,5 +1,25 @@
 # Fixed-Input Reconstruction Probe
 
+## Completed Math Probe, 2026-09-23
+
+The user supplied both within-process reports and the cross-process comparison
+for `outputs/vmem_reconstruction_math_v1/a` and `b`. With two reconstructions
+per process, all 40 preprocessing arrays, all 30 prediction arrays and all 19
+aligned-output arrays match exactly in every reported comparison.
+`matched_control`, RNG equality, attention-record equality and unchanged
+weights all pass. Ambient environments match the saved reference as well.
+
+This is a passed fixed-five-frame math-profile reconstruction check. It does
+not identify one faulty native kernel, prove determinism for all input lengths,
+or establish a quality improvement. The submitted log does not include the
+updated CPU test output; only the earlier 16-test pass is on record here.
+
+The next step is the [combined-attention generation check](VMEM_GENERATION_DEBUG.md#combined-attention-generation-check).
+The generator now has an opt-in `--cut3r-attention math` path with the same
+inference-only scope. Its default remains native, and nonnative CLI use is
+restricted to short fresh debug runs. Do not repeat the standalone commands
+below just because they remain in the runbook; they document completed work.
+
 ## Completed Native Probe, 2026-09-23
 
 The user ran all 16 original probe tests successfully on CECSL, then ran two
@@ -50,9 +70,9 @@ profile/flags; old native reports remain readable. Source hashes now include
 the shared attention helper. `environment_matches_reference` describes ambient
 state, not equality of the deliberately overridden inference dispatch.
 
-After pushing/pulling, run the updated CPU tests in `vmem`, then check current
-GPU availability. The previous 16-test pass predates the new control tests;
-no new tests or experiments have been run on the Mac.
+The following commands document the completed math probe. The previous
+16-test pass predates its new control tests; no new tests or experiments have
+been run on the Mac. The next full-generation check is linked above.
 
 ```bash
 conda activate vmem
@@ -60,8 +80,8 @@ CUDA_VISIBLE_DEVICES="" python -m unittest discover -s tests -p 'test_reconstruc
 nvidia-smi
 ```
 
-If tests pass and GPU 1 is available, use two fresh math-profile processes.
-The native results above are preserved; no existing output is overwritten.
+The user ran two fresh math-profile processes. The native results above were
+preserved; no existing output was overwritten.
 
 ```bash
 GPU=1

@@ -1,5 +1,81 @@
 # Short VMem Reproducibility Diagnostic
 
+## Combined-Attention Generation Check
+
+The user-run math CUT3R probe now passes exact preprocessing, prediction and
+aligned-output equality within and across two fresh processes. See
+[the completed results](VMEM_RECONSTRUCTION_PROBE.md#completed-math-probe-2026-09-23).
+Together with the prior CLIP and post-eviction noise checks, this supports a
+full-generator check with all three controls, not a quality-improvement claim.
+
+New `--cut3r-attention native|math` defaults to native. The runner records it in
+arguments, metadata and effective `surfel.cut3r_attention` config; pairing
+audits compare it, treating older missing flags as native. Generation provenance
+now includes the changed CUT3R reconstruction entry point and its inference,
+attention-block and model files, but still not every dependency/compiled kernel.
+
+The pipeline supplies the same scoped math-attention helper tested in the probe
+to `run_inference_from_pil`. Its optional context wraps only the inference call,
+restoring dispatch before collation/alignment, including on errors. It does not
+wrap the video denoiser, change precision, tune GeoCov, change reconstruction
+inputs, or skip surfel updates. Native/default callers retain native dispatch.
+The CPU tests exercise the actual function with neural calls stubbed, pipeline
+config forwarding, restoration and CLI/provenance guards; they await CECSL.
+
+Both math flags still require a fresh, unlocked 1-12 action debug run with
+checkpoints disabled. This is not yet the versioned, resumable 60-second protocol.
+After pushing/pulling, ask the user to run the full CPU suite in `vmem` and check
+GPU availability. No tests, dry runs, inference or SSH jobs are run on the Mac.
+
+```bash
+conda activate vmem
+CUDA_VISIBLE_DEVICES="" python -m unittest discover -s tests -v
+nvidia-smi
+```
+
+If tests pass and GPU 1 is available, generate a new matched 49-frame pair:
+
+```bash
+GPU=1
+ROOT=outputs/vmem_debug_combined_math_v1
+for CASE in unbounded geocov32; do
+  POLICY=(--memory-policy unbounded)
+  if [ "$CASE" = geocov32 ]; then
+    POLICY=(--memory-policy slam_covisibility --memory-budget 32)
+  fi
+  CUDA_VISIBLE_DEVICES="$GPU" python -u scripts/run_vmem_demo_actions.py \
+    --image test_samples/oxford.jpg --run-id "combined_${CASE}" \
+    --output-root "$ROOT" --trajectory pan_45 --num-actions 12 \
+    --fps 13 --frames-per-action 4 --step-size 0.1 --seed 501 \
+    --frame-storage resident --memory-scope surfel_indexed_view_memory \
+    --inference-steps 50 --surfel-niter 400 --checkpoint-every 0 \
+    --generation-debug isolated --clip-attention math --cut3r-attention math \
+    "${POLICY[@]}" || break
+done
+```
+
+The processes are sequential; GPU selection does not reserve VRAM. After both
+complete, set `A` and `B` to their printed unbounded and GeoCov directories:
+
+```bash
+python scripts/audit_vmem_generation_debug.py --left "$A" --right "$B" \
+  > "$ROOT/generation_comparison.json"
+python scripts/audit_vmem_pairing.py --unbounded "$A" --bounded "$B" --compare-pixels \
+  > "$ROOT/pairing_pixels.json"
+```
+
+Require matching recorded settings/provenance, matching diffusion initial and
+sampler noise across every action, and legal bounded residency/retrieval. Check
+pre-eviction contexts, reconstruction inputs, geometry counts and saved pixels
+through frame 32, including generation on the first evicting action. Post-eviction
+conditioning/output differences are expected; whole-run event equality is not
+the acceptance criterion. Count equality alone is not proof of full geometry
+equality. If this passes, promote controls to a separately versioned non-debug
+runner/manifest with recovery identity and resume validation; then regenerate
+both 60-second arms. Preserve the original VBench scores and run artifacts.
+
+## Earlier Checks
+
 The user verified all 21 pairing-audit tests on CECSL and compared actual saved
 PNG pixels through frame 32. Frame 1 first differs: mean absolute channel error
 0.169186, RMSE 0.447214, maximum 26 on a 0-255 scale; 33.7556% of pixels have at
@@ -68,8 +144,9 @@ preprocessing, raw CUT3R predictions and aligned outputs; a passing standalone
 probe would not rule out full-process or surfel-merging effects. The subsequent
 user-run native probe now reproduces variation in raw CUT3R predictions, with
 matching preprocessing/weights/RNG, within and across processes. All 16 original
-probe tests passed. See its report and probe-only math control in the linked
-document. No 60-second corrected rerun has been supplied. Production RNG/attention
+probe tests passed. Its subsequent math-profile probe now passes all three
+stages within/across processes; the integrated generation check is above.
+No 60-second corrected rerun has been supplied. Production RNG/attention
 settings, recovery compatibility and a new frozen protocol still need migration
 before a resumable long rerun. Old videos and quality results remain intact.
 

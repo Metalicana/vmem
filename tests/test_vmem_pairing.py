@@ -118,6 +118,13 @@ class PairingAuditTest(unittest.TestCase):
         self.assertEqual(compare_runs(self.left, self.right)["provenance_mismatches"],
                          ["arguments.clip_attention", "arguments.generation_debug"])
 
+    def test_cut3r_profile_is_not_silently_paired(self):
+        self.edit("run_spec.json", lambda spec: spec["arguments"].update(cut3r_attention="native"))
+        self.assertEqual(compare_runs(self.left, self.right)["provenance_mismatches"], [])
+        self.edit("run_spec.json", lambda spec: spec["arguments"].update(cut3r_attention="math"))
+        self.assertEqual(compare_runs(self.left, self.right)["provenance_mismatches"],
+                         ["arguments.cut3r_attention"])
+
     def test_missing_provenance_is_not_a_verified_match(self):
         self.edit("run_spec.json", lambda spec: spec["provenance"].pop("checkpoint_sha256"))
         self.assertIn("provenance.checkpoint_sha256", compare_runs(self.left, self.right)["missing_provenance"])
