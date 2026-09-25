@@ -15,8 +15,7 @@ source "${VMEM_ROOT:-$HOME/vmem}/slurm/newton_vmem_common.sh"
 : "${VMEM_CUDA_WHEEL:?Set cu126 or cu128 matching the loaded nvcc toolkit}"
 command -v nvcc
 nvcc --version
-command -v c++
-c++ --version
+# setup_vmem_newton.py resolves CC/CXX and compiles a preflight before pip.
 ARGS=()
 if [[ "${VMEM_FETCH_WEIGHTS:-no}" == yes ]]; then ARGS+=(--fetch-weights); fi
 exec "$VMEM_PYTHON" -u scripts/setup_vmem_newton.py \

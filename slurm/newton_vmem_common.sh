@@ -11,6 +11,9 @@ export PYTHONUNBUFFERED=1 TOKENIZERS_PARALLELISM=false MPLBACKEND=Agg
 export HF_HOME="${HF_HOME:-$HOME/hf_cache}"
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
 export MKL_NUM_THREADS="$OMP_NUM_THREADS" OPENBLAS_NUM_THREADS="$OMP_NUM_THREADS"
+if [[ -n "${VMEM_COMPILER_MODULE:-}" ]]; then
+    module load "$VMEM_COMPILER_MODULE"
+fi
 if [[ -n "${VMEM_CUDA_MODULE:-}" ]]; then
     module load "$VMEM_CUDA_MODULE"
 fi

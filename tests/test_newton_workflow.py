@@ -8,6 +8,7 @@ from unittest.mock import patch, MagicMock
 
 from scripts import run_vmem_results as workflow
 from scripts import vmem_slurm as slurm
+from scripts import setup_vmem_newton as setup
 from scripts.setup_vmem_newton import runtime_requirements, stage_constraints, COMPATIBILITY_CONSTRAINTS
 from scripts.profile_vmem_newton import action_profile
 
@@ -150,6 +151,52 @@ class NewtonProtocolTest(unittest.TestCase):
             root = Path(tmp)
             with self.assertRaises(FileNotFoundError):
                 stage_constraints(root, root / "missing.txt")
+
+    def test_compiler_probe_uses_explicit_cc_for_nvcc_and_cxx_for_host(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.dict(setup.os.environ, {"CC": "/gcc/bin/gcc", "CXX": "/gcc/bin/g++",
+                                              "CUDA_VISIBLE_DEVICES": "7"}, clear=True), \
+                patch.object(setup.shutil, "which", side_effect=lambda name: name), \
+                patch.object(setup, "command", return_value=SimpleNamespace(stdout="GCC 12.3.0")) as run:
+            result = setup.compiler_preflight(Path(tmp), "/cuda/bin/nvcc")
+            commands = [[str(arg) for arg in call.args[0]] for call in run.call_args_list]
+            self.assertEqual(commands[2][0], "/gcc/bin/g++")
+            self.assertIn("-std=c++17", commands[2])
+            self.assertEqual(commands[-1][:4], ["/cuda/bin/nvcc", "-std=c++17", "-ccbin", "/gcc/bin/gcc"])
+            self.assertEqual(result["status"], "passed")
+            self.assertEqual(setup.os.environ["CUDA_VISIBLE_DEVICES"], "7")
+            self.assertFalse(any("pip" in cmd for cmd in commands))
+            self.assertIn("__GNUC__ < 9", (Path(tmp) / "compiler_probe/probe.cpp").read_text())
+
+    def test_compiler_probe_resolves_defaults_and_exports_them(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.dict(setup.os.environ, {}, clear=True), \
+                patch.object(setup.shutil, "which", side_effect=lambda name: "/gcc/bin/" + name), \
+                patch.object(setup, "command", return_value=SimpleNamespace(stdout="GCC 12.3.0")):
+            setup.compiler_preflight(Path(tmp), "/cuda/bin/nvcc")
+            self.assertEqual(setup.os.environ["CC"], "/gcc/bin/gcc")
+            self.assertEqual(setup.os.environ["CXX"], "/gcc/bin/g++")
+
+    def test_compiler_probe_rejects_missing_explicit_compiler_without_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.dict(setup.os.environ, {"CC": "/missing/gcc"}, clear=True), \
+                patch.object(setup.shutil, "which", return_value=None), \
+                patch.object(setup, "command") as run:
+            with self.assertRaisesRegex(ValueError, "Cannot find CC"):
+                setup.compiler_preflight(Path(tmp), "/cuda/bin/nvcc")
+            run.assert_not_called()
+
+    def test_compiler_probe_stops_at_compile_failure(self):
+        for failed_call in (2, 4):
+            with self.subTest(failed_call=failed_call), tempfile.TemporaryDirectory() as tmp, \
+                    patch.dict(setup.os.environ, {}, clear=True), \
+                    patch.object(setup.shutil, "which", side_effect=lambda name: "/gcc/bin/" + name), \
+                    patch.object(setup, "command") as run:
+                run.side_effect = ([SimpleNamespace(stdout="GCC 12.3.0")] * failed_call
+                                   + [setup.subprocess.CalledProcessError(1, ["compiler"])])
+                with self.assertRaisesRegex(RuntimeError, "No pip install was attempted"):
+                    setup.compiler_preflight(Path(tmp), "/cuda/bin/nvcc")
+                self.assertEqual(run.call_count, failed_call + 1)
 
     def test_profile_warmup_and_projection_scope(self):
         actions = [{"action_index": i, "wall_seconds": value} for i, value in enumerate((100, 80, 10, 20, 30))]

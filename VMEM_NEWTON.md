@@ -80,7 +80,13 @@ sbatch slurm/newton_vmem_setup.sbatch
 ```
 
 The job loads that module without purging the module environment and requires
-matching `nvcc`. It installs Torch 2.7.0 / torchvision 0.22.0 first, keeps NumPy
+matching `nvcc`. If `VMEM_COMPILER_MODULE` is set, all Newton wrappers load that
+compiler module before CUDA, including generation jobs that may need its runtime
+libraries. The installer resolves explicit `CC` / `CXX` (otherwise `gcc` / `g++`
+on PATH), then compiles/links/runs a C++17 probe and compiles a small CUDA source
+with the same `CC` that PyTorch passes to nvcc. This runs before any pip install;
+compiler paths/versions are saved in `setup.json`. It is not a CUDA kernel smoke.
+The installer then installs Torch 2.7.0 / torchvision 0.22.0 first, keeps NumPy
 1.24.4, installs the remaining repo requirements under the Newton compatibility
 constraints, then
 builds curope with `--no-build-isolation`. The extension imports Torch at build
@@ -155,6 +161,36 @@ shell (the wrapper checks the allocation/mask):
 This runs setup in the current allocation, not a nested job. It does not launch
 videos. If the allocation expired, use the `sbatch` setup command above instead.
 Local validation of this patch is static only; no install or tests run on the Mac.
+
+### Compiler failure after dependency installation
+
+The user-reported retry `setup_20260925T154155_717102Z` successfully installed
+the Python runtime dependencies, then failed compiling curope. Its nvcc host
+compiler could not execute `cc1plus`; the separate `c++` compile hit PyTorch's
+explicit GCC >=9 check. The CUDA 12.6 toolkit alone does not provide a suitable
+host C++ toolchain. Do not undo the successful dependency installation, suppress
+compiler version checks, or recreate the environment.
+
+Inspect available compiler modules, without guessing a site-specific name:
+
+```bash
+module -t avail 2>&1 | grep -Ei 'gcc|gnu|llvm'
+command -v gcc g++ c++
+printf 'CC=%s CXX=%s\n' "${CC:-unset}" "${CXX:-unset}"
+```
+
+Choose an available compatible GCC toolchain (11 or 12 are within
+[CUDA 12.6's supported range](https://docs.nvidia.com/cuda/archive/12.6.0/cuda-installation-guide-linux/index.html#host-compiler-support-policy)),
+load it, and set `CC` and `CXX` to that module's `gcc` and `g++` executable paths.
+Set `VMEM_COMPILER_MODULE` to the actual module name for subsequent jobs, then
+retry the same setup wrapper. Existing satisfied packages are reused; compiler
+and import/kernel checks still must pass. The preflight reproduces both build
+routes because [PyTorch 2.7 BuildExtension](https://github.com/pytorch/pytorch/blob/v2.7.0/torch/utils/cpp_extension.py)
+uses `CC` for nvcc's `-ccbin`, independently of `CXX`.
+
+No successful curope build, complete setup, or Newton generation is established
+by these two failed attempts. Compiler-preflight regression tests were added
+but not run on the Mac.
 
 ### Download Weights
 

@@ -50,6 +50,46 @@ def stage_constraints(output, replay=None):
     return arguments, records
 
 
+def compiler_preflight(output, nvcc):
+    """Check the actual C++ and nvcc host compilers before changing packages."""
+    compilers = {}
+    for variable, default in (("CC", "gcc"), ("CXX", "g++")):
+        requested = os.environ.get(variable) or default
+        path = shutil.which(requested)
+        if path is None:
+            raise ValueError(f"Cannot find {variable}={requested!r}. Load a GCC module and set CC/CXX to its executables.")
+        compilers[variable] = os.path.abspath(path)
+    # PyTorch BuildExtension uses CC for nvcc's -ccbin, separately from CXX.
+    os.environ.update(compilers)
+    directory = output / "compiler_probe"
+    directory.mkdir()
+    source = directory / "probe.cpp"
+    source.write_text(
+        "#include <optional>\n#include <string>\n"
+        "#if defined(__GNUC__) && !defined(__clang__) && __GNUC__ < 9\n"
+        '#error "PyTorch 2.7 requires GCC 9 or later"\n#endif\n'
+        'int main() { std::optional<std::string> value{std::string{"vmem"}}; return value->empty(); }\n'
+    )
+    cuda_source = directory / "probe.cu"
+    cuda_source.write_text(source.read_text() + "__global__ void probe(int* value) { *value = 1; }\n")
+    executable = directory / "probe"
+    try:
+        versions = {name: command([path, "--version"], capture_output=True, text=True, timeout=30).stdout
+                    for name, path in compilers.items()}
+        command([compilers["CXX"], "-std=c++17", source, "-o", executable], timeout=120)
+        command([executable], timeout=30)
+        command([nvcc, "-std=c++17", "-ccbin", compilers["CC"], "-arch=sm_90",
+                 "-c", cuda_source, "-o", directory / "probe.o"], timeout=120)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(
+            f"Compiler preflight failed with CC={compilers['CC']}, CXX={compilers['CXX']}. "
+            "Load a CUDA-compatible GCC module (GCC 9 or later for PyTorch), set both CC and CXX, "
+            "and retry setup. No pip install was attempted. See the compiler error above."
+        ) from exc
+    return {"status": "passed", "executables": compilers, "versions": versions,
+            "scope": "C++17 compile/link/run and nvcc host/device compilation for sm_90; no CUDA kernel executed"}
+
+
 def fetch_weights(output):
     from huggingface_hub import hf_hub_download, snapshot_download
     from open_clip.pretrained import get_pretrained_cfg, download_pretrained
@@ -123,6 +163,8 @@ def main():
             constraint_args, record["constraints"] = stage_constraints(output, args.constraints)
             runtime = output / "runtime-requirements.txt"
             runtime.write_text(runtime_requirements((REPO / "requirements.txt").read_text()))
+            save(output / "setup.json", record)
+            record["compiler_probe"] = compiler_preflight(output, nvcc)
             save(output / "setup.json", record)
             command([*pip, "install", "torch==2.7.0", "torchvision==0.22.0", *constraint_args,
                      "--index-url", "https://download.pytorch.org/whl/" + args.cuda])
