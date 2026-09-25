@@ -1,0 +1,16 @@
+# Newton bootstrap compatibility pins, not a complete validated environment lock.
+# Keep upstream's numerical base; select the CUDA wheel in setup_vmem_newton.py.
+torch==2.7.0
+torchvision==0.22.0
+numpy==1.24.4
+
+# huggingface-hub[torch] activates safetensors[numpy]. Version 0.8.0 requires
+# numpy>=1.24.6; constrain its consumers together instead of upgrading NumPy.
+safetensors==0.6.2
+transformers==4.51.3
+huggingface-hub==0.34.4
+diffusers==0.35.1
+gradio==5.49.1
+
+# Prevent evo/rosbags resolution from falling into old, broken source builds.
+ruamel.yaml==0.18.6

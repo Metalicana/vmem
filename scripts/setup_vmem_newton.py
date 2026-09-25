@@ -1,6 +1,7 @@
 """Install only in a dedicated Newton vmem environment; execute on an allocation."""
 
 import argparse
+import hashlib
 import importlib.metadata as metadata
 import json
 import os
@@ -12,6 +13,7 @@ import subprocess
 import sys
 
 REPO = Path(__file__).resolve().parents[1]
+COMPATIBILITY_CONSTRAINTS = REPO / "requirements-newton-constraints.txt"
 
 
 def runtime_requirements(text):
@@ -30,6 +32,22 @@ def runtime_requirements(text):
 def command(args, **kwargs):
     print(shlex.join(map(str, args)), flush=True)
     return subprocess.run(list(map(str, args)), check=True, **kwargs)
+
+
+def stage_constraints(output, replay=None):
+    """Use immutable per-attempt copies for installation and provenance."""
+    sources = [(COMPATIBILITY_CONSTRAINTS, "vmem-pins.txt")]
+    if replay is not None:
+        sources.append((Path(replay).resolve(), "replay-pins.txt"))
+    arguments, records = [], []
+    for source, name in sources:
+        contents = source.read_bytes()
+        target = output / name
+        target.write_bytes(contents)
+        arguments.extend(["-c", target])
+        records.append({"source": str(source), "snapshot": str(target),
+                        "sha256": hashlib.sha256(contents).hexdigest()})
+    return arguments, records
 
 
 def fetch_weights(output):
@@ -98,21 +116,21 @@ def main():
         pip = [sys.executable, "-m", "pip"]
         record = {"status": "installing", "python": sys.executable, "cuda_wheel": args.cuda,
                   "nvcc": toolkit, "allocation": allocation(), "requirements_sha256": digest(REPO / "requirements.txt"),
+                  "installer_sha256": digest(Path(__file__)),
                   "git_commit": command(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()}
         save(output / "setup.json", record)
-        constraints = output / "vmem-pins.txt"
-        constraints.write_text("torch==2.7.0\ntorchvision==0.22.0\nnumpy==1.24.4\n")
-        runtime = output / "runtime-requirements.txt"
-        runtime.write_text(runtime_requirements((REPO / "requirements.txt").read_text()))
-        constraint_args = ["-c", constraints]
-        if args.constraints:
-            constraint_args.extend(["-c", args.constraints.resolve()])
         try:
+            constraint_args, record["constraints"] = stage_constraints(output, args.constraints)
+            runtime = output / "runtime-requirements.txt"
+            runtime.write_text(runtime_requirements((REPO / "requirements.txt").read_text()))
+            save(output / "setup.json", record)
             command([*pip, "install", "torch==2.7.0", "torchvision==0.22.0", *constraint_args,
                      "--index-url", "https://download.pytorch.org/whl/" + args.cuda])
             command([sys.executable, REPO / "scripts/vmem_slurm.py", "--gpu-only",
                      "--output", output / "cuda.json"], timeout=180)
-            command([*pip, "install", *constraint_args, "setuptools", "wheel", "packaging", "ninja", "-r", runtime])
+            command([*pip, "install", *constraint_args,
+                     "--only-binary=ruamel.yaml,safetensors", "--report", output / "runtime-install.json",
+                     "setuptools", "wheel", "packaging", "ninja", "-r", runtime])
             command([*pip, "install", *constraint_args, "--no-build-isolation", "-e",
                      REPO / "extern/CUT3R/src/croco/models/curope"])
             command([*pip, "check"])

@@ -29,6 +29,7 @@ On the Mac, review and commit/push the intended files yourself, including the
 previously untracked results scripts. This session did not commit or push.
 `git status --short` shows files that a normal remote pull will not yet receive.
 Required new files include `VMEM_NEWTON.md`, `VMEM_RESULTS.md`,
+`requirements-newton-constraints.txt`,
 `manifests/vmem_newton_smoke_v1.jsonl`, `scripts/{run_vmem_results.py,
 run_vmem_results.sh,report_vmem_results.py,vmem_slurm.py,profile_vmem_newton.py,
 setup_vmem_newton.py}`, `tests/{test_results_workflow.py,test_newton_workflow.py}`,
@@ -61,38 +62,43 @@ Inspect an existing `vmem` environment before using it. The installer refuses
 other environment paths/names and refuses to reinstall after its success marker.
 It never installs into `memcam`, `vbench`, or `dfot`.
 
-Find a CUDA toolkit module on Newton; its exact name is not known here:
+The user reported `cuda/cuda-12.6.0` as available on Newton. Check the active
+toolkit, not just the driver's CUDA version in `nvidia-smi`:
 
 ```bash
 module list
 module avail cuda
 ```
 
-Choose an **available CUDA 12.6 or 12.8 toolkit**, then submit the setup job.
-Replace the module placeholder below with the actual listed name and match the
-wheel (`cu126` for 12.6, `cu128` for 12.8):
+Use the available CUDA 12.6 toolkit and matching `cu126` wheel. From a login
+shell, submit setup as follows (do not submit again inside a live GPU allocation):
 
 ```bash
-export VMEM_CUDA_MODULE='ACTUAL_CUDA_12_8_MODULE_NAME'
-export VMEM_CUDA_WHEEL=cu128
+export VMEM_CUDA_MODULE=cuda/cuda-12.6.0
+export VMEM_CUDA_WHEEL=cu126
 sbatch slurm/newton_vmem_setup.sbatch
 ```
 
 The job loads that module without purging the module environment and requires
 matching `nvcc`. It installs Torch 2.7.0 / torchvision 0.22.0 first, keeps NumPy
-1.24.4, installs the remaining repo requirements under those constraints, then
+1.24.4, installs the remaining repo requirements under the Newton compatibility
+constraints, then
 builds curope with `--no-build-isolation`. The extension imports Torch at build
 time and supplies its own architecture flags; no claim of a single-architecture
 build or fixed build time is made. Compiler errors are not hidden.
 These Torch/CUDA wheel combinations are listed by
 [PyTorch](https://pytorch.org/get-started/previous-versions/).
 
-The first install resolves upstream's unpinned dependencies, so it is **not yet
-a validated fully pinned Newton environment**. The installer records commands,
-commit, nvcc, `pip check`, `pip-freeze.txt`, and `resolved-pins.txt` in a unique
+The constraints fix the Hugging Face dependency family and YAML version, not
+every transitive dependency. This is **not yet a validated fully pinned Newton
+environment**. The installer records commands, commit, installer hash, nvcc,
+constraint copies/hashes, the runtime pip install report (if resolution succeeds),
+`pip check`, `pip-freeze.txt`, and `resolved-pins.txt` in a unique
 `$HOME/vmem_results/environment/setup_*` directory. Only a successful record
 is suitable for replay; the Python installer accepts `--constraints` pointing
-to that record's resolved pins. Keep its matching Torch wheel selection and
+to that record's resolved pins, in addition to the compatibility constraints.
+Conflicting replay pins fail resolution instead of overriding the baseline.
+Keep its matching Torch wheel selection and
 rebuild the editable extension. Do not edit a working environment during jobs.
 
 Installation runs a real allocated CUDA matrix multiplication, curope forward /
@@ -100,6 +106,57 @@ inverse CUDA kernels, VMem/CUT3R imports, PNG/MP4 I/O, and the CPU unit tests.
 No model generation occurs. The success marker is
 `$HOME/.conda/envs/vmem/vmem_setup_complete.json`; setup logs are
 `vmem_setup_JOB_ID.{out,err}`. An interrupted install is not a success.
+
+### Dependency-resolution retry, 2026-09-25
+
+The user-reported attempt `setup_20260925T152739_195226Z` failed in the runtime
+pip install, before curope compilation or generation. Pip backtracked into
+`ruamel.yaml==0.15.77`, whose build script raised `NameError: Str` on Python 3.10.
+There was also a concrete incompatible candidate family: the selected
+Transformers required safetensors >=0.8.0, while `huggingface-hub[torch]`
+enabled its NumPy extra. [Safetensors 0.8.0 metadata](https://raw.githubusercontent.com/huggingface/safetensors/v0.8.0/bindings/python/pyproject.toml)
+requires NumPy >=1.24.6 for that extra, conflicting with VMem's 1.24.4 pin.
+
+The Newton-only constraints now use safetensors 0.6.2, Transformers 4.51.3,
+Hub 0.34.4, Diffusers 0.35.1, Gradio 5.49.1 and ruamel.yaml 0.18.6. Their
+declared dependency ranges were inspected; this is not a claim that installation
+or inference has passed. Safetensors and ruamel.yaml must have wheels, so pip
+cannot fall back to the failing old YAML source build. Other dependencies still
+resolve normally, and `pip check` plus the existing CUDA/import/tests remain
+mandatory. No `--no-deps` bypass or change to the shared `requirements.txt` is used.
+Sources: [safetensors](https://raw.githubusercontent.com/huggingface/safetensors/v0.6.2/bindings/python/pyproject.toml),
+[Transformers](https://raw.githubusercontent.com/huggingface/transformers/v4.51.3/setup.py),
+[Hub](https://raw.githubusercontent.com/huggingface/huggingface_hub/v0.34.4/setup.py),
+[Diffusers](https://raw.githubusercontent.com/huggingface/diffusers/v0.35.1/setup.py),
+[Gradio](https://raw.githubusercontent.com/gradio-app/gradio/gradio@5.49.1/requirements.txt),
+[ruamel.yaml](https://pypi.org/project/ruamel.yaml/0.18.6/).
+
+After publishing/pulling this patch, retry in the existing dedicated environment.
+Keep the failed record, do not replay its partial `resolved-pins.txt`, and do not
+delete the environment or reinstall Torch by hand. In a still-live Slurm GPU
+shell (the wrapper checks the allocation/mask):
+
+```bash
+(
+  set -euo pipefail
+  cd "$HOME/vmem"
+  module unload cuda/cuda-13.1.0
+  module load cuda/cuda-12.6.0
+  hash -r
+  export VMEM_CUDA_MODULE=cuda/cuda-12.6.0 VMEM_CUDA_WHEEL=cu126
+  export VMEM_PYTHON="$HOME/.conda/envs/vmem/bin/python"
+  export VMEM_FETCH_WEIGHTS=no
+  mkdir -p "$HOME/vmem_results/environment"
+  LOG="$HOME/vmem_results/environment/setup_retry_${SLURM_JOB_ID}_$(date +%Y%m%d_%H%M%S).log"
+  bash slurm/newton_vmem_setup.sbatch 2>&1 | tee "$LOG"
+)
+```
+
+This runs setup in the current allocation, not a nested job. It does not launch
+videos. If the allocation expired, use the `sbatch` setup command above instead.
+Local validation of this patch is static only; no install or tests run on the Mac.
+
+### Download Weights
 
 After setup succeeds, authenticate interactively with access approval for
 `liguang0115/vmem`, then cache and hash all four generation dependencies:

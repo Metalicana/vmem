@@ -1,4 +1,5 @@
 import json
+import hashlib
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -7,7 +8,7 @@ from unittest.mock import patch, MagicMock
 
 from scripts import run_vmem_results as workflow
 from scripts import vmem_slurm as slurm
-from scripts.setup_vmem_newton import runtime_requirements
+from scripts.setup_vmem_newton import runtime_requirements, stage_constraints, COMPATIBILITY_CONSTRAINTS
 from scripts.profile_vmem_newton import action_profile
 
 
@@ -109,6 +110,46 @@ class NewtonProtocolTest(unittest.TestCase):
             runtime_requirements(requirements.replace("torch==2.7.0", "torch==2.7.1"))
         with self.assertRaises(ValueError):
             runtime_requirements(requirements + "\n--extra-index-url https://example.invalid\n")
+
+    def test_newton_constraints_preserve_numerical_base_and_compatible_hub_family(self):
+        pins = {line for line in COMPATIBILITY_CONSTRAINTS.read_text().splitlines()
+                if line and not line.startswith("#")}
+        self.assertTrue({"torch==2.7.0", "torchvision==0.22.0", "numpy==1.24.4",
+                         "safetensors==0.6.2", "transformers==4.51.3",
+                         "huggingface-hub==0.34.4", "diffusers==0.35.1",
+                         "gradio==5.49.1", "ruamel.yaml==0.18.6"}.issubset(pins))
+        self.assertTrue(all("==" in pin and not pin.startswith("-") for pin in pins))
+
+    def test_install_constraints_are_snapshotted_and_hashed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            arguments, records = stage_constraints(root)
+            snapshot = root / "vmem-pins.txt"
+            self.assertEqual(arguments, ["-c", snapshot])
+            self.assertEqual(snapshot.read_bytes(), COMPATIBILITY_CONSTRAINTS.read_bytes())
+            self.assertEqual(records, [{"source": str(COMPATIBILITY_CONSTRAINTS),
+                                       "snapshot": str(snapshot),
+                                       "sha256": hashlib.sha256(snapshot.read_bytes()).hexdigest()}])
+
+    def test_replay_pins_supplement_instead_of_replace_compatibility_constraints(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            replay = root / "resolved-pins.txt"
+            contents = b"torch==2.7.0+cu126\nnumpy==1.24.4\n"
+            replay.write_bytes(contents)
+            arguments, records = stage_constraints(root, replay)
+            self.assertEqual(arguments, ["-c", root / "vmem-pins.txt", "-c", root / "replay-pins.txt"])
+            self.assertEqual(len(records), 2)
+            self.assertEqual(replay.read_bytes(), contents)
+            replay.write_text("changed after snapshot\n")
+            self.assertEqual((root / "replay-pins.txt").read_bytes(), contents)
+            self.assertEqual(records[1]["sha256"], hashlib.sha256(contents).hexdigest())
+
+    def test_missing_replay_constraints_are_not_silently_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with self.assertRaises(FileNotFoundError):
+                stage_constraints(root, root / "missing.txt")
 
     def test_profile_warmup_and_projection_scope(self):
         actions = [{"action_index": i, "wall_seconds": value} for i, value in enumerate((100, 80, 10, 20, 30))]
