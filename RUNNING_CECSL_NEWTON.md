@@ -1,5 +1,11 @@
 # VMem Budgeted Memory Runs
 
+**2026-09-25:** use [VMEM_NEWTON.md](VMEM_NEWTON.md) for the new H100/Slurm
+port, or [VMEM_RESULTS.md](VMEM_RESULTS.md) for CECSL resume-to-results.
+The CECSL-only statements and generic Newton examples below are historical;
+they do not describe the new allocated, gated workflow. No Newton run has yet
+been verified in this workspace.
+
 For the current payload-eviction work, start with
 [resident-memory transfer v2](VMEM_RESIDENT_MEMORY.md). Its CECSL validation is
 pending; old passes and launches below do not validate the new storage path.

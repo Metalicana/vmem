@@ -1,5 +1,38 @@
 # VMem Memory Ownership and Measurement Audit
 
+## 2026-09-25 Newton Port, Not Yet Executed
+
+[The Newton runbook](VMEM_NEWTON.md) adds dedicated environment setup, an
+allocated CUDA/native-extension smoke, and a separate 18-action Oxford pair
+through eviction and one commanded return. The foreground Slurm adapter keeps
+the inherited GPU mask and records allocation identity; timeout warning exits
+preserve the last committed checkpoint. Both arms keep v3 generation controls.
+Long Oxford/full-suite jobs require explicit approval and a revalidated short
+profile. No Newton environment, test, job or quality result is claimed yet.
+No generation/retrieval/policy/recovery core source was edited for this port.
+
+Reports now include measured action times, allocator allocated/reserved peaks
+and maximum sampled post-update RSS (not a continuous host-memory peak). A
+short-pilot constant-rate projection does not establish that unbounded 60-second
+generation fits an 80GB H100 or four hours. The same resource-bound limitations
+remain; the old CECSL pilot is preserved separately.
+
+## 2026-09-25 Resume-to-Results Automation
+
+The user chose to resume the 60-second Oxford v3 pair. New
+[one-command orchestration](VMEM_RESULTS.md) reuses the original lock and last
+committed checkpoint, runs inventory/prefix validation, six VBench-Long
+dimensions, commanded-return RGB MSE, and produces a portable HTML/video/CSV
+report. It waits for an idle selected GPU and preserves incomplete attempts.
+No generation, retention, reconstruction or checkpoint implementation changed
+in this update. No experiments/tests were run on the Mac.
+
+The previous unbounded process was reported at action index 94 and cancellation
+was requested; completion/cancellation is not inferred from that request alone.
+The controller checks for live jobs before resuming. Resumed resource traces
+are labelled by session, not promoted to uninterrupted latency measurements.
+No new video-quality result, seed CI or benchmark improvement is established.
+
 ## 2026-09-23 Combined-Control Pass and V3
 
 The CECSL combined math-CLIP/math-CUT3R/isolated-RNG pair now passes: all 33

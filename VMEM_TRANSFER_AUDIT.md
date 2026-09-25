@@ -1,5 +1,32 @@
 # VMem External Transfer: Audit and MemCam Handoff
 
+## 2026-09-25 Newton Operational Handoff
+
+The new [Newton workflow](VMEM_NEWTON.md) is implemented but unexecuted. It
+preserves the audited v3 controller/retriever/generation settings, uses an
+18-action hardware smoke before a separately approved unchanged 60-second run,
+and creates fresh Newton locks/results. It neither migrates CECSL checkpoints
+automatically nor certifies four-hour/80GB fit. Setup, native CUDA kernels,
+matched prefix/payload checks and measured throughput/peaks must pass remotely.
+No new scientific result follows from this port; previous negative quality
+results remain part of the record. Mac work was static inspection/editing only.
+
+## 2026-09-25 Results Orchestration
+
+The user requested resuming the Oxford 60-second v3 pair and a single command
+through evaluation/reporting. [VMEM_RESULTS.md](VMEM_RESULTS.md) documents the
+new controller: existing-source-lock recovery, isolated selected-GPU admission,
+validated output reuse, per-dimension VBench retries, commanded-return MSE,
+resource plots and a portable report. Scientific generation sources/settings
+are untouched to preserve the interrupted checkpoint's identity. CPU tests
+and actual orchestration await CECSL; no local experiments were run.
+
+This supports the VMem transfer/resource part of the pasted research checklist,
+not its same-budget cross-system policy-baseline claim. Paper fixes, MemCam and
+WorldMem analyses, SpMem, multiple seeds, held-out splits and formal inference
+are not completed by this automation. The resumed Oxford pilot remains one
+paired case with no new measured quality outcome yet.
+
 ## 2026-09-23 Execution-Control Update
 
 Short CECSL checks now establish matched diffusion noise through eviction with
